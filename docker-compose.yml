@@ -1,0 +1,152 @@
+# The STRICT deployment: mutual TLS, service identities, private API, no insecure routes.
+#
+#   one-time setup (creates ./secrets and ./data on the host):
+#       docker compose --profile setup run --rm setup
+#   run:
+#       docker compose up --build
+#   open:   dashboard http://localhost:8501     coordinator API https://localhost:8000
+#           demo passwords: ./secrets/DEMO_CREDENTIALS.txt        (hospitals are NOT reachable from the host)
+#
+# Least privilege, by construction (checked statically by tests/test_deployment.py):
+#   * a hospital mounts ONLY its own database, its own data key, its own TLS key, and the other services' PUBLIC certificates;
+#   * the coordinator mounts NO hospital database and no hospital key - only its own SQLite volume, JWT/audit keys, TLS key;
+#   * the dashboard mounts only the CA certificate;
+#   * hospitals publish no ports; only the coordinator (8000) and dashboard (8501) are reachable from the host;
+#   * ALLOW_INSECURE_BASELINE is never set.
+#
+# NOTE: this file could not be executed on the machine it was written on (no Docker installed). It was validated
+# statically; the identical topology is exercised by `python scripts/run_local.py --secure`.
+
+x-common-env: &common-env
+  FEDHEALTH_STRICT: "1"
+  FEDHEALTH_SCHEME: https
+  FEDHEALTH_TLS_DIR: /certs
+  FEDHEALTH_SECRETS_DIR: /secrets
+  FEDHEALTH_DATA_DIR: /data
+  FEDHEALTH_HOST_A: hospital-a
+  FEDHEALTH_HOST_B: hospital-b
+  FEDHEALTH_HOST_C: hospital-c
+  FEDHEALTH_HOST_COORDINATOR: coordinator
+
+x-hospital: &hospital
+  build: .
+  image: fedhealth:latest
+  restart: unless-stopped
+  networks: [fednet]
+
+services:
+  hospital-a:
+    <<: *hospital
+    command: >
+      uvicorn fedhealth.hospital.app:create_app_from_env --factory --host 0.0.0.0 --port 8001
+      --ssl-keyfile /certs/hospital-a.key --ssl-certfile /certs/hospital-a.crt
+      --ssl-ca-certs /certs/ca.pem --ssl-cert-reqs 2
+    environment: {<<: *common-env, HOSPITAL_ID: A}
+    volumes:
+      - ./data/hospital_a.db:/data/hospital_a.db
+      - ./secrets/hospital_a.key:/secrets/hospital_a.key:ro
+      - ./secrets/tls/hospital-a.key:/certs/hospital-a.key:ro
+      # public certificates only (every service must verify the others' tokens and certificates)
+      - ./secrets/tls/ca.pem:/certs/ca.pem:ro
+      - ./secrets/tls/coordinator.crt:/certs/coordinator.crt:ro
+      - ./secrets/tls/hospital-a.crt:/certs/hospital-a.crt:ro
+      - ./secrets/tls/hospital-b.crt:/certs/hospital-b.crt:ro
+      - ./secrets/tls/hospital-c.crt:/certs/hospital-c.crt:ro
+    expose: ["8001"]
+
+  hospital-b:
+    <<: *hospital
+    command: >
+      uvicorn fedhealth.hospital.app:create_app_from_env --factory --host 0.0.0.0 --port 8002
+      --ssl-keyfile /certs/hospital-b.key --ssl-certfile /certs/hospital-b.crt
+      --ssl-ca-certs /certs/ca.pem --ssl-cert-reqs 2
+    environment: {<<: *common-env, HOSPITAL_ID: B}
+    volumes:
+      - ./data/hospital_b.db:/data/hospital_b.db
+      - ./secrets/hospital_b.key:/secrets/hospital_b.key:ro
+      - ./secrets/tls/hospital-b.key:/certs/hospital-b.key:ro
+      # public certificates only (every service must verify the others' tokens and certificates)
+      - ./secrets/tls/ca.pem:/certs/ca.pem:ro
+      - ./secrets/tls/coordinator.crt:/certs/coordinator.crt:ro
+      - ./secrets/tls/hospital-a.crt:/certs/hospital-a.crt:ro
+      - ./secrets/tls/hospital-b.crt:/certs/hospital-b.crt:ro
+      - ./secrets/tls/hospital-c.crt:/certs/hospital-c.crt:ro
+    expose: ["8002"]
+
+  hospital-c:
+    <<: *hospital
+    command: >
+      uvicorn fedhealth.hospital.app:create_app_from_env --factory --host 0.0.0.0 --port 8003
+      --ssl-keyfile /certs/hospital-c.key --ssl-certfile /certs/hospital-c.crt
+      --ssl-ca-certs /certs/ca.pem --ssl-cert-reqs 2
+    environment: {<<: *common-env, HOSPITAL_ID: C}
+    volumes:
+      - ./data/hospital_c.db:/data/hospital_c.db
+      - ./secrets/hospital_c.key:/secrets/hospital_c.key:ro
+      - ./secrets/tls/hospital-c.key:/certs/hospital-c.key:ro
+      # public certificates only (every service must verify the others' tokens and certificates)
+      - ./secrets/tls/ca.pem:/certs/ca.pem:ro
+      - ./secrets/tls/coordinator.crt:/certs/coordinator.crt:ro
+      - ./secrets/tls/hospital-a.crt:/certs/hospital-a.crt:ro
+      - ./secrets/tls/hospital-b.crt:/certs/hospital-b.crt:ro
+      - ./secrets/tls/hospital-c.crt:/certs/hospital-c.crt:ro
+    expose: ["8003"]
+
+  coordinator:
+    <<: *hospital
+    command: >
+      uvicorn fedhealth.coordinator.app:create_app_from_env --factory --host 0.0.0.0 --port 8000
+      --ssl-keyfile /certs/coordinator.key --ssl-certfile /certs/coordinator.crt
+      --ssl-ca-certs /certs/ca.pem --ssl-cert-reqs 0
+    environment: *common-env
+    volumes:
+      - coordinator-data:/data                        # its OWN database: users, epsilon ledger, audit log
+      - ./secrets/jwt_secret.key:/secrets/jwt_secret.key:ro
+      - ./secrets/audit_key.key:/secrets/audit_key.key:ro
+      - ./secrets/users.json:/secrets/users.json:ro
+      - ./secrets/tls/coordinator.key:/certs/coordinator.key:ro
+      # public certificates only (every service must verify the others' tokens and certificates)
+      - ./secrets/tls/ca.pem:/certs/ca.pem:ro
+      - ./secrets/tls/coordinator.crt:/certs/coordinator.crt:ro
+      - ./secrets/tls/hospital-a.crt:/certs/hospital-a.crt:ro
+      - ./secrets/tls/hospital-b.crt:/certs/hospital-b.crt:ro
+      - ./secrets/tls/hospital-c.crt:/certs/hospital-c.crt:ro
+    ports: ["8000:8000"]
+    depends_on: [hospital-a, hospital-b, hospital-c]
+
+  dashboard:
+    build: .
+    image: fedhealth:latest
+    restart: unless-stopped
+    networks: [fednet]
+    command: streamlit run fedhealth/dashboard/app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+    environment:
+      FEDHEALTH_COORDINATOR_URL: https://coordinator:8000
+      FEDHEALTH_CA: /certs/ca.pem
+    volumes:
+      - ./secrets/tls/ca.pem:/certs/ca.pem:ro
+    ports: ["8501:8501"]
+    depends_on: [coordinator]
+
+  # One-off: creates keys, certificates and the synthetic databases on the host (profile "setup" = not started by `up`).
+  setup:
+    build: .
+    image: fedhealth:latest
+    profiles: [setup]
+    user: root
+    environment:
+      FEDHEALTH_SECRETS_DIR: /secrets
+      FEDHEALTH_DATA_DIR: /data
+    command: >
+      sh -c "python scripts/gen_keys.py && python scripts/gen_certs.py &&
+             python -m fedhealth.synth.generate --patients 5000 --seed 42"
+    volumes:
+      - ./secrets:/secrets
+      - ./data:/data
+
+networks:
+  fednet:
+    driver: bridge
+
+volumes:
+  coordinator-data:

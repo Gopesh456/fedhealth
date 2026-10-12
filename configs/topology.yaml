@@ -1,0 +1,12 @@
+# Where each service lives. `ring` is the fixed order used by the PSI ring protocol (Phase 2).
+# Override hosts for containers with FEDHEALTH_HOST_<ID> (e.g. FEDHEALTH_HOST_A=hospital-a).
+scheme: http            # becomes https (mutual TLS) in Phase 5
+ring: [A, B, C]
+hospitals:
+  A: {name: "Hospital A", holds: "medical history",      host: 127.0.0.1, port: 8001, db: hospital_a.db}
+  B: {name: "Hospital B", holds: "diagnostic reports",   host: 127.0.0.1, port: 8002, db: hospital_b.db}
+  C: {name: "Hospital C", holds: "prescriptions",        host: 127.0.0.1, port: 8003, db: hospital_c.db}
+coordinator:
+  host: 127.0.0.1
+  port: 8000
+  db: coordinator.db    # coordinator's OWN metadata (users, epsilon ledger, audit log) - never patient data

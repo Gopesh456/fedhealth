@@ -1,0 +1,83 @@
+{
+  "attack": "budget exhaustion",
+  "query": "count(E11, age 40-65, metformin, improved)",
+  "true_value": 93,
+  "epsilon_per_query": 0.5,
+  "attackers_simulated": 100,
+  "unlimited": [
+    {
+      "queries": 1,
+      "mean_abs_error": 1.6,
+      "theory": 2.2334207242008604,
+      "epsilon_spent": 0.5
+    },
+    {
+      "queries": 2,
+      "mean_abs_error": 1.135,
+      "theory": 1.579266939324998,
+      "epsilon_spent": 1.0
+    },
+    {
+      "queries": 5,
+      "mean_abs_error": 0.9420000000000006,
+      "theory": 0.9988161123339866,
+      "epsilon_spent": 2.5
+    },
+    {
+      "queries": 10,
+      "mean_abs_error": 0.6419999999999991,
+      "theory": 0.7062696461897463,
+      "epsilon_spent": 5.0
+    },
+    {
+      "queries": 20,
+      "mean_abs_error": 0.45900000000000035,
+      "theory": 0.4994080561669933,
+      "epsilon_spent": 10.0
+    },
+    {
+      "queries": 50,
+      "mean_abs_error": 0.3112000000000003,
+      "theory": 0.31585338786499967,
+      "epsilon_spent": 25.0
+    },
+    {
+      "queries": 100,
+      "mean_abs_error": 0.22400000000000034,
+      "theory": 0.22334207242008602,
+      "epsilon_spent": 50.0
+    },
+    {
+      "queries": 200,
+      "mean_abs_error": 0.17440000000000055,
+      "theory": 0.15792669393249983,
+      "epsilon_spent": 100.0
+    },
+    {
+      "queries": 500,
+      "mean_abs_error": 0.10744,
+      "theory": 0.09988161123339866,
+      "epsilon_spent": 250.0
+    },
+    {
+      "queries": 1000,
+      "mean_abs_error": 0.07701999999999956,
+      "theory": 0.07062696461897464,
+      "epsilon_spent": 500.0
+    }
+  ],
+  "with_ledger": {
+    "budget": 10.0,
+    "epsilon_per_query": 0.5,
+    "attempted": 30,
+    "answered": 20,
+    "refused": 10,
+    "first_refusal_at_query": 21,
+    "epsilon_spent": 10.0,
+    "final_estimate": 93.05,
+    "final_abs_error": 0.04999999999999716,
+    "expected_abs_error_at_that_point": 0.4994080561669933
+  },
+  "single_query_expected_abs_error": 1.9190347513349437,
+  "note": "theory = CLT approximation of E|mean|, accurate for N >= ~50; N=1 is exactly single_query_expected_abs_error"
+}

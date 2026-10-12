@@ -1,0 +1,17 @@
+# The query WHITELIST (beyond the closed vocabularies in fedhealth/common/vocab.py).
+# A query may only mention fields listed here; each field is owned by exactly one hospital.
+#
+# value_fields: numeric per-patient attributes usable by SUM / AVG.
+#   scale: values are multiplied by `scale` and rounded to integers before they enter secret sharing.
+#   min/max: clamping bounds (-> SUM sensitivity). For lab_delta the bound is per-condition (vocab Lab.clamp).
+value_fields:
+  age:           {owner: A, min: 0, max: 120, scale: 1}
+  lab_delta:     {owner: B, scale: 100}
+  adherence_pct: {owner: C, min: 0, max: 100, scale: 1}
+
+# group_by: categorical attributes usable by HISTOGRAM (every matching patient falls in exactly one bin).
+group_by:
+  sex:      {owner: A}
+  age_band: {owner: A}
+  outcome:  {owner: B}
+  drug:     {owner: C}     # bin = the patient's earliest matching prescription for the condition

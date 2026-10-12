@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fedhealth"
+version = "0.1.0"
+description = "Privacy-preserving federated healthcare query system (research prototype, synthetic data only)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "sqlalchemy>=2.0",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+    "cryptography>=42",
+    "PyJWT>=2.8",
+    "PyYAML>=6.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.32", "pandas>=2.1"]
+eval = ["matplotlib>=3.8", "pandas>=2.1"]
+dev = ["pytest>=8.0"]
+fast = ["gmpy2>=2.1"]     # optional: ~7x faster modular exponentiation for PSI (falls back to pow())
+
+[tool.setuptools.packages.find]
+include = ["fedhealth*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: real uvicorn processes / TLS / full-size PSI (deselect with -m 'not slow')",
+]

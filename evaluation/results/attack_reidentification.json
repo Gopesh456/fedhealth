@@ -1,0 +1,142 @@
+{
+  "attack": "re-identification",
+  "released_records": 3750,
+  "aux_records": 3550,
+  "aux_coverage": 0.7,
+  "by_qi": [
+    {
+      "qi": "birth_year",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 10
+    },
+    {
+      "qi": "sex",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 1841
+    },
+    {
+      "qi": "zip",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 7
+    },
+    {
+      "qi": "birth_year+sex",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 3
+    },
+    {
+      "qi": "birth_year+zip",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 1269,
+      "correct": 1046,
+      "reid_rate": 0.2789333333333333,
+      "precision": 0.8242710795902285,
+      "unique_in_release": 0.3864,
+      "min_group_size": 1
+    },
+    {
+      "qi": "sex+zip",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0002666666666666667,
+      "min_group_size": 1
+    },
+    {
+      "qi": "birth_year+sex+zip",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 1681,
+      "correct": 1462,
+      "reid_rate": 0.38986666666666664,
+      "precision": 0.8697204045211184,
+      "unique_in_release": 0.5378666666666667,
+      "min_group_size": 1
+    }
+  ],
+  "defences": [
+    {
+      "label": "exact birth year + sex + ZIP5 (names removed only)",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 1681,
+      "correct": 1462,
+      "reid_rate": 0.38986666666666664,
+      "precision": 0.8697204045211184,
+      "unique_in_release": 0.5378666666666667,
+      "min_group_size": 1
+    },
+    {
+      "label": "age band + sex + ZIP3 (generalised)",
+      "released_records": 3750,
+      "retained_fraction": 1.0,
+      "claimed": 2,
+      "correct": 2,
+      "reid_rate": 0.0005333333333333334,
+      "precision": 1.0,
+      "unique_in_release": 0.0008,
+      "min_group_size": 1
+    },
+    {
+      "label": "generalised + 5-anonymity",
+      "released_records": 3696,
+      "retained_fraction": 0.9856,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 5
+    },
+    {
+      "label": "generalised + 10-anonymity",
+      "released_records": 3400,
+      "retained_fraction": 0.9066666666666666,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 10
+    },
+    {
+      "label": "exact + 10-anonymity",
+      "released_records": 30,
+      "retained_fraction": 0.008,
+      "claimed": 0,
+      "correct": 0,
+      "reid_rate": 0.0,
+      "precision": null,
+      "unique_in_release": 0.0,
+      "min_group_size": 10
+    }
+  ]
+}

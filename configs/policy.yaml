@@ -1,0 +1,36 @@
+# Access policy: which role may ask what, and how much privacy budget each requester gets.
+# (The budget is per USER; the role only decides its initial size. See fedhealth/privacy/access_control/rbac.py)
+
+k_threshold: 10          # answers backed by fewer patients are suppressed
+k_basis: exact           # exact | noisy  (see fedhealth/privacy/suppression.py)
+default_delta: 1.0e-6    # delta used when a Gaussian query does not specify one
+jwt_ttl_seconds: 1800
+
+roles:
+  researcher:
+    description: counts and histograms; modest budget
+    aggs: [count, histogram]
+    mechanisms: [laplace]
+    max_epsilon_per_query: 1.0
+    total_epsilon: 10.0
+    total_delta: 0.0
+    audit: own               # may read only their own audit entries
+
+  clinician:
+    description: all aggregates incl. SUM/AVG; larger budget; Gaussian allowed
+    aggs: [count, sum, avg, histogram]
+    mechanisms: [laplace, gaussian]
+    max_epsilon_per_query: 2.0
+    total_epsilon: 20.0
+    total_delta: 1.0e-4
+    audit: own
+
+  auditor:
+    description: no data queries; reads the full audit log and verifies its integrity
+    aggs: []
+    mechanisms: []
+    max_epsilon_per_query: 0.0
+    total_epsilon: 0.0
+    total_delta: 0.0
+    audit: all
+    verify_audit: true
