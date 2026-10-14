@@ -6,9 +6,15 @@ STAGES (every number is a wall-clock HTTP round trip to the coordinator, against
     + PSI (warm)   same, linkage already cached
     + SMPC (cold)  PSI + secret-shared aggregation, exact result, no DP/auth
     + SMPC (warm)  secret-shared aggregation on a cached linkage                       (breakdown: prepare/share/triples/multiply)
-    FULL (cold)    strict deployment: mutual TLS + service tokens + JWT login + RBAC + ledger + k + DP + audit, first query
+    FULL (cold)    strict deployment: mutual TLS + service tokens + JWT login + RBAC + ledger + hospital noise shares
+                   inside the MPC + k-threshold + audit, first query
     FULL (warm)    the same, linkage cached
     and the cost of pure-Python modular exponentiation (no gmpy2) for the cold linkage.
+
+Every PSI list and the linked index are padded to the public bound M (`linkage.pad_to`), so the cost no longer grows with
+the number of patients; and hospitals answer `prepare` at a public deadline (configs/policy.yaml: response_deadlines).
+`prepare_work` measures what the deadline has to cover: the same services with the deadlines switched off, over every
+query shape, at the largest size.
 
 The cold/warm split matters: linkage depends only on WHO is in each hospital, not on the query, so it is computed once
 and reused by every later query over the same hospitals.
@@ -99,6 +105,7 @@ def measure_dev(world: Path, offset: int, reps: int, cold_reps: int, extra_env: 
                 out["smpc_warm"] = [t for t, _ in warm]
                 out["smpc_warm_breakdown"] = {k: statistics.median([j["timings"][k] for _, j in warm])
                                               for k in ("prepare_s", "share_s", "triples_s", "multiply_s")}
+                out["smpc_warm_prepare"] = [j["timings"]["prepare_s"] for _, j in warm]     # = the deadline, unless overrun
         finally:
             run_local.stop_services(procs)
     return out
@@ -131,6 +138,59 @@ def measure_strict(world: Path, offset: int, reps: int, tls_dir: Path) -> dict:
     return out
 
 
+PREPARE_SHAPES = {
+    "COUNT narrow": {"agg": "count", "condition": "E11", "a": {"age_min": 40, "age_max": 65}, "b": {"outcome": "improved"},
+                     "c": {"drug": "metformin"}},
+    "COUNT broad": {"agg": "count", "condition": "I10", "a": {}, "b": {}, "c": {}},
+    "SUM lab": {"agg": "sum", "condition": "E11", "a": {}, "b": {}, "c": {}, "value_field": "lab_delta"},
+    "AVG age": {"agg": "avg", "condition": "I10", "a": {}, "b": {}, "c": {}, "value_field": "age"},
+    "HISTOGRAM drug": {"agg": "histogram", "condition": "I10", "a": {}, "b": {}, "c": {}, "group_by": "drug"},
+    "HISTOGRAM age band": {"agg": "histogram", "condition": "E11", "a": {}, "b": {}, "c": {}, "group_by": "age_band"},
+}
+
+
+def measure_prepare_work(world: Path, offset: int, reps: int) -> dict:
+    """How long `prepare` really takes (deadlines OFF), per query shape: the slowest hospital, as the coordinator sees it.
+    This is what the public prepare deadline has to cover (plus the noise draw, measured by noise_share_cost)."""
+    out: dict = {}
+    with env(FEDHEALTH_DATA_DIR=world, FEDHEALTH_PORT_OFFSET=offset, FEDHEALTH_DEADLINE_SCALE=0):
+        procs = run_local.start_services(quiet=True, timeout=180)
+        try:
+            topo = load_topology()
+            with httpx.Client(base_url=f"http://127.0.0.1:{topo.coordinator_port}", timeout=900) as c:
+                for name, body in PREPARE_SHAPES.items():
+                    timed_post(c, "/insecure/mpc-query", json=body)                  # links once per hospital set
+                    out[name] = [timed_post(c, "/insecure/mpc-query", json=body)[1]["timings"]["prepare_s"] for _ in range(reps)]
+        finally:
+            run_local.stop_services(procs)
+    return out
+
+
+def noise_share_cost(reps: int = 20) -> dict:
+    """Median time for ONE hospital to draw its noise share with the exact samplers (what `prepare` adds)."""
+    import secrets as _secrets
+    from fedhealth.coordinator.release import PrivacyParams, plan_noise
+    specs = {
+        "COUNT ε=1": (SPEC, PrivacyParams(epsilon=1.0)),
+        "COUNT ε=0.1": (SPEC, PrivacyParams(epsilon=0.1)),
+        "HISTOGRAM ε=1": (QuerySpec.model_validate({"agg": "histogram", "condition": "I10", "a": {}, "b": {}, "c": {}, "group_by": "outcome"}),
+                          PrivacyParams(epsilon=1.0)),
+        "SUM age ε=1": (QuerySpec.model_validate({"agg": "sum", "condition": "I10", "a": {}, "value_field": "age"}), PrivacyParams(epsilon=1.0)),
+        "SUM lab ε=1": (QuerySpec.model_validate({"agg": "sum", "condition": "E11", "b": {}, "value_field": "lab_delta"}), PrivacyParams(epsilon=1.0)),
+        "COUNT Gaussian ε=1": (SPEC, PrivacyParams(epsilon=1.0, mechanism="gaussian")),
+    }
+    out = {}
+    for name, (spec, pp) in specs.items():
+        plan = plan_noise(spec, pp, contributors=3)
+        times = []
+        for _ in range(reps):
+            t0 = time.perf_counter()
+            plan.sample_share(_secrets.randbelow)
+            times.append(time.perf_counter() - t0)
+        out[name] = statistics.median(times)
+    return out
+
+
 def machine() -> dict:
     return {"platform": platform.platform(), "processor": platform.processor(), "cpu_count": os.cpu_count(),
             "python": platform.python_version(), "gmpy2": HAVE_GMPY2}
@@ -147,7 +207,8 @@ def run(sizes=SIZES, reps: int = 15, cold_reps: int = 3, seed: int = 42, pure_py
         dev = measure_dev(world, 700, reps, cold_reps)
         print(f"[N={n}] strict mode (mTLS + JWT + DP + audit) ...", flush=True)
         strict = measure_strict(world, 750, reps, tls_tmp)
-        entry = {k: summarize(v) for k, v in {**dev, **strict}.items() if isinstance(v, list)}
+        entry = {k: summarize(v) for k, v in {**dev, **strict}.items() if isinstance(v, list) and k != "smpc_warm_prepare"}
+        entry["smpc_warm_prepare"] = dev["smpc_warm_prepare"]
         entry["smpc_warm_breakdown"] = dev["smpc_warm_breakdown"]
         entry["login_s"] = strict["login_s"]
         # patients per hospital and linked cohort for context
@@ -156,9 +217,23 @@ def run(sizes=SIZES, reps: int = 15, cold_reps: int = 3, seed: int = 42, pure_py
     print(f"[N={pure_python_n}] cold linkage WITHOUT gmpy2 (pure-Python pow) ...", flush=True)
     world = ensure_world(pure_python_n, seed)
     pure = measure_dev(world, 800, reps, 2, extra_env={"FEDHEALTH_NO_GMPY2": "1"}, only_cold_psi=True)
-    accel = result["sizes"].get(str(pure_python_n), {}).get("psi_cold_linkage_s")
+    accel = result["sizes"].get(str(pure_python_n), {}).get("psi_cold_linkage_s") if HAVE_GMPY2 else None   # else: both pure
     result["pure_python_psi"] = {"n": pure_python_n, "linkage_s": summarize(pure["psi_cold_linkage_s"]),
                                  "with_gmpy2_linkage_s": accel}
+    result["noise_share_s"] = noise_share_cost()
+    big = ensure_world(max(sizes), seed)
+    print(f"[N={max(sizes)}] prepare work with the deadlines off ...", flush=True)
+    work = measure_prepare_work(big, 850, reps)
+    from fedhealth.hospital.deadlines import load_response_deadlines
+    with env(FEDHEALTH_DEADLINE_SCALE=1):
+        deadlines = load_response_deadlines()
+    exact_deadline = deadlines.prepare(None, 1)
+    warm_prepare = [v for e in result["sizes"].values() for v in e.get("smpc_warm_prepare", [])]
+    result["prepare_deadline"] = {
+        "deadline_s": exact_deadline, "work_s": {k: summarize(v) for k, v in work.items()},
+        "max_work_s": max(max(v) for v in work.values()),
+        "warm_prepare_s": summarize(warm_prepare) if warm_prepare else None,
+        "overruns": sum(1 for v in warm_prepare if v >= 2 * exact_deadline), "observed": len(warm_prepare)}
     return result
 
 

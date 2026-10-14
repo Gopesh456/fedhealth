@@ -2,6 +2,12 @@
 # Override hosts for containers with FEDHEALTH_HOST_<ID> (e.g. FEDHEALTH_HOST_A=hospital-a).
 scheme: http            # becomes https (mutual TLS) in Phase 5
 ring: [A, B, C]
+# Every hospital pads its PSI list with random dummy identifiers to this PUBLIC size, and the linked index (the MPC
+# vectors) has this length too - so neither the list sizes nor the linked-cohort sizes m_S leave a hospital.
+# Must be >= every hospital's patient count (a hospital refuses to link otherwise); raising it is a public change.
+# Override with FEDHEALTH_LINK_PAD_TO (the test suite uses a small bound for its small worlds).
+linkage:
+  pad_to: 4608
 hospitals:
   A: {name: "Hospital A", holds: "medical history",      host: 127.0.0.1, port: 8001, db: hospital_a.db}
   B: {name: "Hospital B", holds: "diagnostic reports",   host: 127.0.0.1, port: 8002, db: hospital_b.db}

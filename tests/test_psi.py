@@ -1,6 +1,7 @@
 """Phase 2: private set intersection (commutative encryption) + the HMAC baseline."""
 from __future__ import annotations
 
+import json
 import random
 
 import numpy as np
@@ -13,6 +14,7 @@ from fedhealth.privacy.linkage.psi import psi_intersection_local
 from fedhealth.synth.generate import generate
 from fedhealth.synth.ground_truth import GroundTruth
 
+from .conftest import TEST_PAD_TO
 from .helpers import headline_spec, random_spec
 from .leakscan import scan
 from .system import build_system
@@ -189,14 +191,57 @@ def small(tmp_path_factory):
     return system, GroundTruth(d / "ground_truth"), d
 
 
-def test_linkage_cohort_sizes_are_exact(small):
+def _linked(system, info, h="A") -> int:
+    """The TRUE linked-cohort size, as only a hospital in the linkage knows it."""
+    return len(system.apps[h].state.psi.linkages[info.lid].mapping)
+
+
+def test_linkage_cohort_sizes_are_exact_but_stay_at_the_hospitals(small):
     system, _, _ = small
     orch = system.orchestrator
     abc = orch.link(["A", "B", "C"])
     ac = orch.link(["A", "C"])
-    assert abc.m == 240 and not abc.cached           # 40% of 600 are at all three hospitals
-    assert ac.m == 312                               # A∩C = ABC (40%) + AC (12%)
-    assert orch.link(["A", "B", "C"]).cached          # second call is served from the cache
+    assert _linked(system, abc) == 240 and not abc.cached   # 40% of 600 are at all three hospitals
+    assert _linked(system, ac) == _linked(system, ac, "C") == 312   # A∩C = ABC (40%) + AC (12%)
+    assert abc.size == ac.size == TEST_PAD_TO               # the coordinator only learns the public bound
+    assert orch.link(["A", "B", "C"]).cached                # second call is served from the cache
+
+
+def test_the_linkage_digest_agrees_everywhere_and_says_nothing_about_an_empty_intersection():
+    """The digest the coordinator compares is a hash of every published tag set: identical at every party, fresh per
+    run, and NOT the constant sha256(b"") it used to be whenever the intersection was empty."""
+    import hashlib
+    from fedhealth.privacy.linkage.group import get_group
+    from fedhealth.privacy.linkage.psi import PsiParty
+    constant = hashlib.sha256(b"").digest()[:8]
+    for sets in ({"A": ["a1", "a2"], "B": ["b1", "b2"]}, {"A": ["x", "a2"], "B": ["x", "b2"]}):
+        digests = []
+        for _ in range(2):
+            group = get_group(FAST)
+            parties = {n: PsiParty(n, list(sets), ids, group) for n, ids in sets.items()}
+            parties["A"].final_elements = parties["B"].encrypt_list(parties["A"].round_one_message())
+            parties["B"].final_elements = parties["A"].encrypt_list(parties["B"].round_one_message())
+            tags = {n: set(p.publish()) for n, p in parties.items()}
+            for n, p in parties.items():
+                p.finalize({o: t for o, t in tags.items() if o != n})
+            assert parties["A"].linked_digest == parties["B"].linked_digest != constant
+            digests.append(parties["A"].linked_digest)
+        assert digests[0] != digests[1]                                    # fresh keys, fresh digest
+
+
+def test_lists_are_padded_to_the_public_bound(small):
+    """Every list a hospital sends round the ring and every tag set has the public length, whatever the hospital's
+    real patient count (A holds 450 patients, B 378, C 402 in this world)."""
+    import base64
+    system, _, _ = small
+    system.rec.clear()
+    system.orchestrator.link(["A", "B", "C"], force=True)
+    group = get_group(FAST)
+    inbox = [e for e in system.rec.events if e.path.endswith("/inbox")]
+    tags = [e for e in system.rec.events if e.path.endswith("/tags")]
+    assert len(inbox) == 9 and len(tags) == 6
+    assert {len(base64.b64decode(json.loads(e.request)["blob"])) // group.nbytes for e in inbox} == {TEST_PAD_TO}
+    assert {len(base64.b64decode(json.loads(e.request)["blob"])) // 16 for e in tags} == {TEST_PAD_TO}
 
 
 def test_force_relink_replaces_the_old_linkage(small):
@@ -204,7 +249,7 @@ def test_force_relink_replaces_the_old_linkage(small):
     orch = system.orchestrator
     first = orch.link(["B", "C"])
     second = orch.link(["B", "C"], force=True)
-    assert second.lid != first.lid and second.m == first.m == 270      # B∩C = BC (5%) + ABC (40%) of 600
+    assert second.lid != first.lid and _linked(system, second, "B") == 270     # B∩C = BC (5%) + ABC (40%) of 600
     for h in "BC":
         assert first.lid not in system.apps[h].state.psi.linkages
         assert second.lid in system.apps[h].state.psi.linkages
@@ -231,11 +276,11 @@ def test_wire_traffic_of_the_psi_protocol_is_clean(small):
     system, gt, d = small
     system.rec.clear()
     info = system.orchestrator.link(["A", "B", "C"], force=True)
-    assert info.m == 240
+    assert _linked(system, info) == 240 and info.size == TEST_PAD_TO
     ids = [p.national_id for p in gt.persons.values()]               # every identifier in the world
     assert system.rec.events, "recorder saw nothing - the test would be vacuous"
     assert scan(system.rec.events, group=get_group(FAST), plain_ids=ids) == []
-    # and the coordinator-facing responses carry nothing but status words and (m, digest)
+    # and the coordinator-facing responses carry nothing but status words and (public size, digest)
     coord_resp = [e.response for e in system.rec.events if e.src == "COORD"]
     assert all(len(r) < 200 for r in coord_resp), "a coordinator-facing response is suspiciously large"
     # peers exchanged the heavy data; the coordinator never received any data-plane message
@@ -268,7 +313,11 @@ def test_peer_messages_are_only_accepted_from_the_ring_neighbour(small):
     # C is A's predecessor in the ring A->B->C->A; B is NOT
     bad = system.raw["A"].post(f"/psi/{lid}/inbox", json={"sender": "B", "round": 1, "blob": ""})
     assert bad.status_code == 403
-    ok = system.raw["A"].post(f"/psi/{lid}/inbox", json={"sender": "C", "round": 1, "blob": ""})
+    short = system.raw["A"].post(f"/psi/{lid}/inbox", json={"sender": "C", "round": 1, "blob": ""})
+    assert short.status_code == 400 and "padded" in short.text           # right sender, but not the public length
+    import base64
+    padded = base64.b64encode(pack_ints([2] * TEST_PAD_TO, get_group(FAST).nbytes)).decode()
+    ok = system.raw["A"].post(f"/psi/{lid}/inbox", json={"sender": "C", "round": 1, "blob": padded})
     assert ok.status_code == 200
     for h in ring:
         system.raw[h].delete(f"/psi/{lid}")
@@ -290,14 +339,15 @@ def test_psi_does_not_return_set_sizes_to_the_coordinator(small):
 
 # ============================================================================ full size, real group (slow)
 @pytest.mark.slow
-def test_full_size_linkage_with_the_real_2048_bit_group(world):
+def test_full_size_linkage_with_the_real_2048_bit_group(world, monkeypatch):
     """5,000 patients, RFC 3526 2048-bit group: PSI cohort sizes equal the exact overlap of the generator."""
+    monkeypatch.setenv("FEDHEALTH_LINK_PAD_TO", "4096")
     system = build_system(world["dir"], psi_group="modp2048")
     abc = system.orchestrator.link(["A", "B", "C"])
     ac = system.orchestrator.link(["A", "C"])
     print(f"\n[PSI timing, in-process threads, gmpy2={HAVE_GMPY2}] "
-          f"A,B,C: {abc.seconds:.1f}s (m={abc.m})   A,C: {ac.seconds:.1f}s (m={ac.m})")
-    assert abc.m == 2000 and ac.m == 2600
+          f"A,B,C: {abc.seconds:.1f}s   A,C: {ac.seconds:.1f}s   (lists padded to {abc.size})")
+    assert _linked(system, abc) == 2000 and _linked(system, ac) == 2600 and abc.size == 4096
     spec = headline_spec()
     gt = GroundTruth(world["gt_dir"])
     assert system.orchestrator.psi_plain_query(spec).result == gt.evaluate(spec)

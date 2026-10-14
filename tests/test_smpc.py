@@ -1,4 +1,4 @@
-"""Phase 3a: additive secret sharing and Beaver multiplication (pure functions, no services)."""
+"""Phase 3a: additive secret sharing, Beaver multiplication, the dealer and the noise inputs (no services)."""
 from __future__ import annotations
 
 import random
@@ -7,7 +7,8 @@ import pytest
 
 from fedhealth.privacy.smpc import beaver
 from fedhealth.privacy.smpc.field import P, decode_vector, encode_vector, rand_vector, to_signed
-from fedhealth.privacy.smpc.protocol import (MpcParty, Program, assemble_result, build_input_vectors, n_outputs,
+from fedhealth.privacy.smpc.protocol import (MpcParty, Program, Roles, assemble_result, assign_roles,
+                                             build_input_vectors, deal, expand_seed, expand_triples, n_outputs,
                                              run_local)
 from fedhealth.privacy.smpc.sharing import reconstruct_scalar, reconstruct_vector, secure_sum, share_vector
 
@@ -171,12 +172,59 @@ def test_end_to_end_semantics_count_sum_avg_histogram():
     assert assemble_result("histogram", run_local(vec, "B", 6), cats) == {"improved": 2, "no_change": 1, "worsened": 1}
 
 
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_noise_shares_are_added_inside_the_computation(n):
+    """Every involved hospital feeds one noise vector in; the opened cells are exactly  exact + sum of the noise."""
+    rng = random.Random(n)
+    m, t = 50, 3
+    names = list("ABC")[:n]
+    owner = names[-1]
+    vectors = {p: ([[rng.randint(0, 1) for _ in range(m)] for _ in range(t)] if p == owner
+                   else [[rng.randint(0, 1) for _ in range(m)]]) for p in names}
+    involved = names if n != 2 else names + ["D"]
+    noise = {p: [rng.randint(-50, 50) for _ in range(t)] for p in (involved if n > 1 else names)}
+    got = [to_signed(x) for x in run_local(vectors, owner, m, noise=noise)]
+    exact = [to_signed(x) for x in _plain(vectors, owner)]
+    assert got == [e + sum(nv[j] for nv in noise.values()) for j, e in enumerate(exact)]
+
+
+# ============================================================================ roles and the dealer
+def test_role_assignment_keeps_the_dealer_out_of_the_computation():
+    r3 = assign_roles(["A", "B", "C"], "B", ["A", "B", "C"])
+    assert r3.computers == ("A", "B") and r3.dealer == "C" and r3.involved == ("A", "B", "C")
+    r2 = assign_roles(["A", "C"], "C", ["A", "B", "C"])
+    assert r2.computers == ("A", "C") and r2.dealer == "B" and r2.involved == ("A", "C", "B")   # the bystander deals
+    for r in (r3, r2):
+        assert r.dealer not in r.computers
+    with pytest.raises(ValueError):
+        assign_roles(["A", "B"], "B", ["A", "B"])                    # nobody left to deal
+    with pytest.raises(ValueError):
+        assign_roles(["A"], "A", ["A", "B", "C"])
+
+
+def test_dealt_triples_are_correct_and_seed_compressed():
+    seed, (x1, y1, z1) = deal(500)
+    x0, y0, z0 = expand_triples(seed, 500)
+    x, y = [(a + b) % P for a, b in zip(x0, x1)], [(a + b) % P for a, b in zip(y0, y1)]
+    assert [(a + b) % P for a, b in zip(z0, z1)] == [(a * b) % P for a, b in zip(x, y)]
+    assert len(seed) == 32 and expand_triples(seed, 500) == (x0, y0, z0)          # P0 re-derives the same shares
+    assert expand_seed(seed, 10, b"x") != expand_seed(seed, 10, b"y")             # domain separation
+
+
+def test_each_computers_triple_shares_look_uniform():
+    """What a single computer holds about the triples (its own share) is uniform: z0 from the PRG, z1 = xy - z0."""
+    seed, (x1, y1, z1) = deal(20000)
+    x0, _, z0 = expand_triples(seed, 20000)
+    for held in (x0, z0, x1, z1):
+        assert _chi_square_uniform(held) < CHI2_P001_DF15
+
+
 # ============================================================================ state-machine guards
 def _two_parties(m=8, t=1):
     prog = Program(2, t, m)
-    parties = ["A", "B"]
-    a = MpcParty("A", parties, "B", prog, own_vectors=[[1] * m])
-    b = MpcParty("B", parties, "B", prog, own_vectors=[[1] * m for _ in range(t)])
+    roles = Roles(("A", "B"), "B", ("A", "B"), "C")
+    a = MpcParty("A", roles, prog, own_vectors=[[1] * m])
+    b = MpcParty("B", roles, prog, own_vectors=[[1] * m for _ in range(t)])
     for src, dst in ((a, b), (b, a)):
         for other, shares in src.split_inputs().items():
             dst.receive_input_shares(src.name, shares)
@@ -187,9 +235,11 @@ def test_cannot_open_before_triples_or_use_a_triple_twice():
     prog, a, b = _two_parties()
     with pytest.raises(RuntimeError):
         a.open_layer(0)                                              # no triples yet
-    from fedhealth.privacy.smpc.protocol import deal
-    for name, (x, y, z) in deal(prog, ["A", "B"]).items():
-        {"A": a, "B": b}[name].set_triples(x, y, z)
+    seed, explicit = deal(prog.total_triples)
+    a.set_triples_from_seed(seed)
+    b.set_triples(*explicit)
+    with pytest.raises(ValueError):
+        b.set_triples(*explicit)                                     # triples arrive once
     a.open_layer(0)
     with pytest.raises(RuntimeError):
         a.open_layer(0)                                              # one triple, one use
@@ -199,10 +249,20 @@ def test_cannot_open_before_triples_or_use_a_triple_twice():
 
 def test_malformed_input_shares_are_rejected():
     prog, a, b = _two_parties()
-    fresh = MpcParty("A", ["A", "B"], "B", prog)
+    roles = Roles(("A", "B"), "B", ("A", "B"), "C")
+    fresh = MpcParty("A", roles, prog)
     with pytest.raises(ValueError):
         fresh.receive_input_shares("B", [[1, 2, 3]])                 # wrong length
     with pytest.raises(ValueError):
         fresh.receive_input_shares("Z", [[0] * 8])                   # not a party
     with pytest.raises(ValueError):
+        fresh.receive_input_shares("C", [[0] * 8])                   # the dealer holds no input here
+    with pytest.raises(ValueError):
         fresh.receive_input_shares("B", [[0] * 8, [0] * 8])          # owner must send exactly t vectors
+    dealer = MpcParty("C", roles, prog)
+    with pytest.raises(ValueError):
+        dealer.receive_input_shares("A", [[0] * 8])                  # the dealer never receives shares
+    with pytest.raises(RuntimeError):
+        dealer.open_layer(0)                                         # ... and never takes part in an opening
+    with pytest.raises(ValueError):
+        a.receive_open(0, "C", [0] * 8, [0] * 8)                     # openings come from the other computer only

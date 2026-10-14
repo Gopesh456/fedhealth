@@ -24,7 +24,9 @@ class ApiError(Exception):
     def message(self) -> str:
         d = self.detail
         if isinstance(d, dict):
-            return str(d.get("detail", d))
+            errors = d.get("errors") or []
+            reason = errors[0].get("msg", "").removeprefix("Value error, ") if errors and isinstance(errors[0], dict) else ""
+            return str(d.get("detail", d)) + (f" ({reason})" if reason else "")
         return str(d)
 
 

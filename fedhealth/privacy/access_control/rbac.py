@@ -44,7 +44,7 @@ class RolePolicy:
 class Policy:
     roles: dict[str, RolePolicy]
     k_threshold: int
-    k_basis: str
+    noise_tolerance: int
     default_delta: float
     jwt_ttl_seconds: int
 
@@ -66,7 +66,7 @@ def load_policy(path: str | Path | None = None) -> Policy:
             max_epsilon_per_query=float(r.get("max_epsilon_per_query", 0)), total_epsilon=float(r.get("total_epsilon", 0)),
             total_delta=float(r.get("total_delta", 0)), audit_scope=r.get("audit", "own"),
             verify_audit=bool(r.get("verify_audit", False)), description=r.get("description", ""))
-    return Policy(roles, int(raw["k_threshold"]), raw.get("k_basis", "exact"), float(raw["default_delta"]),
+    return Policy(roles, int(raw["k_threshold"]), int(raw.get("distributed_noise", {}).get("tolerance", 1)), float(raw["default_delta"]),
                   int(raw.get("jwt_ttl_seconds", 1800)))
 
 

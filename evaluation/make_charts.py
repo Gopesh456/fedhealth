@@ -71,22 +71,28 @@ def load(name: str):
 
 # --------------------------------------------------------------------------------------------- attack 1
 def chart_differencing(d) -> Path:
+    sys.path.insert(0, str(ROOT / "attacks"))
+    from differencing import analytic_accuracy              # noqa: E402 - the exact formula, for a smooth line
     dp = [r for r in d["rows"] if r["epsilon"]]
     eps = np.array([r["epsilon"] for r in dp])
     acc = np.array([r["accuracy"] for r in dp])
     lo = np.array([r["ci95"][0] for r in dp])
     hi = np.array([r["ci95"][1] for r in dp])
+    r_total = dp[0]["noise_contributors"] / dp[0]["honest_shares"]
     fine = np.geomspace(eps.min(), eps.max(), 80)
-    analytic = [0.5 + (1 - np.exp(-e)) * (1 + np.exp(-2 * e)) / (2 * (1 + np.exp(-e)) ** 3) for e in fine]
+    analytic = [analytic_accuracy(e, r_total) for e in fine]
+    coalition = [analytic_accuracy(e, 1.0) for e in fine]
     bound = [np.exp(2 * e) / (1 + np.exp(2 * e)) for e in fine]
     fig, ax = plt.subplots(figsize=(8.4, 5))
     ax.axhline(1.0, color=INK2, lw=1.4, ls=(0, (6, 3)))
     ax.axhline(0.5, color=MUTED, lw=1.2)
     ax.fill_between(eps, lo, hi, color=BLUE, alpha=0.16, lw=0)
     ax.plot(fine, bound, color=AQUA, ls=":", lw=2.2)
+    ax.plot(fine, coalition, color=YELLOW, ls="-.", lw=2)
     ax.plot(fine, analytic, color=ORANGE, ls="--", lw=2)
-    ax.plot(eps, acc, color=BLUE, marker=MARKERS[0], label="Measured (attacker accuracy, 95% CI)")
-    ax.plot([], [], color=ORANGE, ls="--", label="Exact theory for this attack")
+    ax.plot(eps, acc, color=BLUE, marker=MARKERS[0], label="Measured requester (attacker accuracy, 95% CI)")
+    ax.plot([], [], color=ORANGE, ls="--", label="Exact theory: requester (all 3 noise shares)")
+    ax.plot([], [], color=YELLOW, ls="-.", label="Exact theory: coordinator + 1 hospital (2 honest shares)")
     ax.plot([], [], color=AQUA, ls=":", label="DP ceiling for ANY attacker (2 queries)")
     ax.set_xscale("log")
     ax.set_xticks(eps)
@@ -97,9 +103,9 @@ def chart_differencing(d) -> Path:
     ax.set_ylabel("Attacker's accuracy at guessing one patient's outcome")
     label(ax, eps.min(), 1.0, "No protection, and k-threshold alone: 100%", INK2, dx=0, dy=9)
     label(ax, eps.max(), 0.5, "Blind guess", MUTED, dx=0, dy=-9, ha="right")
-    legend(ax, loc="center left", bbox_to_anchor=(0.0, 0.62))
+    legend(ax, loc="center left", bbox_to_anchor=(0.0, 0.64))
     title(ax, "Differencing attack: differential privacy is what stops it",
-          f"{d['n_targets']} isolatable targets · {d['trials_per_setting']:,} trials per setting · cohorts far above k = 10")
+          f"{d['n_targets']} isolatable targets · {d['trials_per_setting']:,} trials per setting · noise added inside the MPC")
     return save(fig, "attack_differencing")
 
 
@@ -176,7 +182,7 @@ def chart_accuracy(d) -> list[Path]:
             ax.scatter(eps, [r["mae"] for e in eps for r in counts if r["mechanism"] == mech and r["epsilon"] == e and r["cohort"] == cohort],
                        s=16, color=color, alpha=0.35, zorder=2)
     th = [counts[0]["theory_mae"]] and [next(r["theory_mae"] for r in counts if r["mechanism"] == "laplace" and r["epsilon"] == e) for e in eps]
-    ax.plot(eps, th, color=AQUA, ls=":", lw=2.2, label="Laplace theory: E|noise|")
+    ax.plot(eps, th, color=AQUA, ls=":", lw=2.2, label="Laplace theory: E|sum of the noise shares|")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xticks(eps)
@@ -186,7 +192,7 @@ def chart_accuracy(d) -> list[Path]:
     ax.set_ylabel("Mean absolute error (patients)")
     legend(ax, loc="upper right")
     title(ax, "Error falls as ε grows - and does not depend on how big the cohort is",
-          "COUNT queries, small / medium / large cohorts (faint dots) · 2,000 releases per point")
+          f"COUNT queries, small / medium / large cohorts (faint dots) · 3 hospitals' noise shares, any 2 suffice · {d['repetitions']:,} releases per point")
     p1 = save(fig, "accuracy_vs_epsilon")
 
     fig, ax = plt.subplots(figsize=(8.4, 5))
@@ -206,7 +212,62 @@ def chart_accuracy(d) -> list[Path]:
     ax.set_ylabel("Mean absolute error ÷ true count")
     legend(ax, loc="upper right")
     title(ax, "Relative error: small cohorts pay for privacy, big ones barely notice", "Laplace mechanism")
-    return [p1, save(fig, "relative_error_vs_epsilon")]
+    return [p1, save(fig, "relative_error_vs_epsilon"), chart_tolerance(d), chart_accounting(d)]
+
+
+def chart_tolerance(d) -> Path:
+    rows = [r for r in d["rows"] if r["kind"] == "tolerance"]
+    eps = sorted({r["epsilon"] for r in rows})
+    fig, ax = plt.subplots(figsize=(8.4, 5))
+    names = {0: "t = 0: all 3 shares needed (= the old trusted-coordinator noise)", 1: "t = 1: any 2 shares suffice (default)",
+             2: "t = 2: any 1 share suffices"}
+    for t, color, marker in ((0, BLUE, MARKERS[0]), (1, ORANGE, MARKERS[1]), (2, AQUA, MARKERS[2])):
+        lap = [next(r for r in rows if r["mechanism"] == "laplace" and r["tolerance"] == t and r["epsilon"] == e) for e in eps]
+        ax.plot(eps, [r["mae"] for r in lap], color=color, marker=marker, label=names[t])
+        label(ax, eps[-1], lap[-1]["mae"], f"t = {t}", INK2, dx=8)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xticks(eps)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.set_xlabel("ε per query")
+    ax.set_ylabel("Mean absolute error (patients)")
+    legend(ax, loc="upper right")
+    m = rows[0]
+    title(ax, "Not trusting the coordinator costs ×√1.5 in noise",
+          f"Laplace, medium cohort (n={m['true_value']}) · t = hospitals that may collude with the coordinator · variance × 3/(3−t)")
+    return save(fig, "collusion_tolerance_cost")
+
+
+def chart_accounting(d) -> Path:
+    a = d["accounting"]
+    eps = np.array([r["epsilon"] for r in a])
+    fig, ax = plt.subplots(figsize=(8.4, 5))
+    series = [("laplace_basic", "Laplace, basic composition (Σε)", BLUE, MARKERS[0], "-"),
+              ("laplace_zcdp", "Laplace, zCDP (Σρ, converted at δ)", ORANGE, MARKERS[1], "-"),
+              ("gaussian_zcdp", "Gaussian (distributed), zCDP", AQUA, MARKERS[2], "--")]
+    for key, name, color, marker, ls in series:
+        ys = np.array([max(r[key], 0.3) for r in a], dtype=float)          # 0 queries drawn at the floor
+        ax.plot(eps, ys, color=color, marker=marker, ls=ls, label=name, markersize=6)
+    ax.plot(eps, [r["laplace_ledger"] for r in a], color=INK2, lw=1.0, ls=":", label="Ledger: admits if either account fits")
+    cross = next((r["epsilon"] for r in a if r["laplace_basic"] >= r["laplace_zcdp"]), None)
+    if cross:
+        ax.axvline(cross, color=MUTED, lw=1.0)
+        label(ax, cross, 2.0, f"basic wins from ε ≈ {cross:g}", MUTED, dx=6)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    top = max(r["gaussian_zcdp"] for r in a) * 1.6
+    ax.set_ylim(0.22, top)
+    ax.set_yticks([0.3] + [10 ** k for k in range(int(np.log10(top)) + 1)])     # the floor tick reads "0"
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: "0" if v < 1 else f"{v:g}"))
+    ax.set_xlabel("ε per query")
+    ax.set_ylabel("Identical queries the budget admits")
+    legend(ax, loc="upper right")
+    b = d["budget"]
+    title(ax, "zCDP accounting: many more small queries from the same budget",
+          f"researcher budget ε = {b['epsilon']:g}, δ = {b['delta']:g} · Gaussian queries are accounted in zCDP only")
+    return save(fig, "budget_accounting")
 
 
 # --------------------------------------------------------------------------------------------- evaluation 2
@@ -251,11 +312,13 @@ def chart_performance(d) -> list[Path]:
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g} s"))
     ax.set_xlim(ns[0] * 0.85, ns[-1] * 2.6)
-    ax.set_xlabel("Patients in the synthetic world")
+    ax.set_xlabel("Patients (people in the world, before the split into hospitals)")
     ax.set_ylabel("Median latency")
-    ax.set_ylim(0.012, 30)
+    lows = [sizes[str(n)][k]["median"] for n in ns for _, k in series]
+    ax.set_ylim(min(lows) * 0.7, max(lows) * 1.8)
     legend(ax, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=3)       # below the plot: the end labels already name each line
-    title(ax, "Scaling: PSI linkage is the cost, everything after it is cheap", "linkage work grows with the patient lists; a cached linkage is reused by every later query")
+    title(ax, "Scaling: PSI linkage is the cost, everything after it is cheap",
+          "lists are padded to a public bound, so the work is set by that bound, not the patient count; a cached linkage is reused")
     return [p1, save(fig, "performance_scaling")]
 
 

@@ -66,8 +66,7 @@ def main() -> None:
     ap = common_args("Dictionary attack on HMAC pseudonyms vs PSI.")
     args = ap.parse_args()
     n = 1000 if args.fast else args.patients
-    ensure_world(n, args.seed)
-    out = run(world_dir(n, args.seed) / "ground_truth")
+    out = run(ensure_world(n, args.seed, args.source) / "ground_truth")
     path = save_json("attack_hmac_dictionary", out)
     print(f"B published {out['b_patients']} HMAC tokens ({out['shared_patients']} also at A, {out['b_only_patients']} only at B).")
     print(f"  dictionary of {out['dictionary_size']:,} candidate IDs -> attacker recovers {out['recovered_from_b']}/{out['b_patients']} of B's patients "

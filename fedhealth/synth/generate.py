@@ -1,6 +1,7 @@
-"""Synthetic data generator CLI.
+"""Data generator CLI: the built-in synthetic world, or a SYNTHEA population mapped onto the three hospitals.
 
-    python -m fedhealth.synth.generate --patients 5000 --seed 42 [--out DIR]
+    python -m fedhealth.synth.generate --patients 5000 --seed 42 [--out DIR]                    built-in generator
+    python -m fedhealth.synth.generate --source synthea --synthea-csv DIR [--synthea-csv DIR2]   Synthea (synth/synthea.py)
 
 Writes (SYNTHETIC DATA ONLY):
     <out>/hospital_a.db  hospital_b.db  hospital_c.db     one SQLite file per hospital
@@ -24,7 +25,7 @@ from sqlalchemy import create_engine, insert
 from sqlalchemy.orm import Session
 
 from fedhealth.common import vocab
-from fedhealth.common.config import data_dir, load_topology
+from fedhealth.common.config import repo_root, data_dir, load_topology
 from fedhealth.hospital import models as m
 from fedhealth.privacy.encryption.aesgcm import NullVault, Vault, load_or_create_key
 from fedhealth.privacy.encryption.column_types import attach_vault
@@ -58,17 +59,28 @@ def _write_db(path: Path, base, tables: dict, vault) -> None:
 
 
 def generate(n_patients: int = 5000, seed: int = 42, out_dir: str | Path | None = None,
-             encrypt: bool = True, key_dir: str | Path | None = None, registry_people: int | None = None) -> dict:
+             encrypt: bool = True, key_dir: str | Path | None = None, registry_people: int | None = None,
+             source: str = "synthetic", synthea_csv: list[str | Path] | None = None) -> dict:
     """encrypt=True (default): sensitive columns are AES-GCM encrypted with a per-hospital key that is created
     in `key_dir` (default: ./secrets or $FEDHEALTH_SECRETS_DIR) - NOT next to the databases.
     encrypt=False writes plaintext; it exists only as the control for the encryption-at-rest tests.
-    registry_people: size of each hospital's federated-learning training registry (default 30% of n_patients; 0 = none)."""
+    registry_people: size of each hospital's federated-learning training registry (default 30% of n_patients; 0 = none).
+    source="synthea": people come from the Synthea CSV export(s) in `synthea_csv` (default: the shipped extract in
+    ./synthea, see scripts/synthea_extract.py). n_patients is then a cap (None = everyone); the federated-learning
+    registries stay synthetic - they are horizontal data with their own generator."""
     out = Path(out_dir) if out_dir else data_dir()
     out.mkdir(parents=True, exist_ok=True)
     gt_dir = out / "ground_truth"
     gt_dir.mkdir(parents=True, exist_ok=True)
 
-    people = build_universe(n_patients, seed)
+    if source == "synthea":
+        from fedhealth.synth.synthea import load_synthea
+        people = load_synthea(synthea_csv or [repo_root() / "synthea"], seed, limit=n_patients)
+        n_patients = len(people)
+    elif source == "synthetic":
+        people = build_universe(n_patients, seed)
+    else:
+        raise ValueError(f"unknown source {source!r}")
     rng = np.random.default_rng(seed + 1000)          # slice-level randomness, independent of the universe
 
     # Hospital-local MRNs: shuffled so the MRN order carries no information about the person.
@@ -90,10 +102,10 @@ def generate(n_patients: int = 5000, seed: int = 42, out_dir: str | Path | None 
     _write_db(out / files["B"], m.BBase, slices["B"], vaults["B"])
     _write_db(out / files["C"], m.CBase, slices["C"], vaults["C"])
     _write_registry_csv(gt_dir, registries)
-    _write_ground_truth(gt_dir, people, seed, n_patients, members)
+    _write_ground_truth(gt_dir, people, seed, n_patients, members, source)
 
     return {
-        "patients": n_patients, "seed": seed, "out": str(out),
+        "source": source, "patients": n_patients, "seed": seed, "out": str(out),
         "hospital_sizes": {h: len(v) for h, v in members.items()},
         "membership": dict(Counter(p.membership for p in people)),
         "registry_rows": {h: len(r) for h, r in registries.items()},
@@ -126,17 +138,18 @@ def _slice_b(people: list[Person], mrn: dict[int, str], rng: np.random.Generator
         if "B" not in p.membership:
             continue
         pid = mrn[p.person_id]
-        first_date = min(e.baseline_lab_date for e in p.episodes)
+        first_date = min(e.baseline_lab_date or e.diagnosed_on for e in p.episodes)
         patients.append(dict(patient_id=pid, national_id=p.national_id, registered_on=_registered(rng, first_date)))
         for e in p.episodes:
             lab = e.condition.lab
-            reports.append(dict(                                       # baseline lab
-                patient_id=pid, report_type="lab", test_code=lab.code, value=e.baseline_value, unit=lab.unit,
-                ref_low=lab.ref_low, ref_high=lab.ref_high,
-                abnormal_flag=_flag(e.baseline_value, lab.ref_low, lab.ref_high),
-                imaging_finding=None, performed_on=e.baseline_lab_date, ordering_reason_icd10=e.condition.code,
-            ))
-            if e.treated:
+            if e.baseline_value is not None:
+                reports.append(dict(                                   # baseline lab
+                    patient_id=pid, report_type="lab", test_code=lab.code, value=e.baseline_value, unit=lab.unit,
+                    ref_low=lab.ref_low, ref_high=lab.ref_high,
+                    abnormal_flag=_flag(e.baseline_value, lab.ref_low, lab.ref_high),
+                    imaging_finding=None, performed_on=e.baseline_lab_date, ordering_reason_icd10=e.condition.code,
+                ))
+            if e.treated and e.outcome:                                # a follow-up exists (always, for the generator)
                 reports.append(dict(                                   # follow-up lab
                     patient_id=pid, report_type="lab", test_code=lab.code, value=e.followup_value, unit=lab.unit,
                     ref_low=lab.ref_low, ref_high=lab.ref_high,
@@ -178,7 +191,8 @@ def _slice_c(people: list[Person], mrn: dict[int, str], rng: np.random.Generator
 
 
 # --------------------------------------------------------------------------- ground truth (eval/test only)
-def _write_ground_truth(gt_dir: Path, people: list[Person], seed: int, n: int, members: dict) -> None:
+def _write_ground_truth(gt_dir: Path, people: list[Person], seed: int, n: int, members: dict,
+                        source: str = "synthetic") -> None:
     with open(gt_dir / "universe.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["person_id", "national_id", "full_name", "sex", "birth_year", "zip_code", "membership"])
@@ -197,12 +211,12 @@ def _write_ground_truth(gt_dir: Path, people: list[Person], seed: int, n: int, m
                     e.outcome or "", repr(e.delta) if e.delta is not None and e.treated else "", len(p.episodes),
                 ])
     params = {
-        "seed": seed, "n_patients": n, "as_of": vocab.AS_OF.isoformat(),
+        "source": source, "seed": seed, "n_patients": n, "as_of": vocab.AS_OF.isoformat(),
         "membership_fractions": vocab.MEMBERSHIP_FRACTIONS,
         "membership_counts": dict(Counter(p.membership for p in people)),
         "hospital_sizes": {h: len(v) for h, v in members.items()},
-        "response_model": vocab.RESPONSE_MODEL,
-        "conditions": {
+        "response_model": vocab.RESPONSE_MODEL if source == "synthetic" else None,
+        "conditions": None if source != "synthetic" else {
             code: {
                 "name": c.name, "intercept": c.intercept, "age_slope": c.age_slope, "male_effect": c.male_effect,
                 "base_improve_logit": c.base_improve_logit,
@@ -241,13 +255,20 @@ def db_content_digest(path: str | Path) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate SYNTHETIC hospital databases.")
-    ap.add_argument("--patients", type=int, default=5000)
+    ap = argparse.ArgumentParser(description="Generate the hospital databases from Synthea (default) or the "
+                                             "parametric synthetic generator.")
+    ap.add_argument("--source", choices=("synthea", "synthetic"), default="synthea")
+    ap.add_argument("--synthea-csv", action="append", default=[],
+                    help="a Synthea CSV export directory, raw or extracted (repeatable; default: ./synthea)")
+    ap.add_argument("--patients", type=int, default=None,
+                    help="synthetic: population size (default 5000); synthea: optional cap (default: everyone)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=None, help="output directory (default: ./data or $FEDHEALTH_DATA_DIR)")
     ap.add_argument("--no-encrypt", action="store_true", help="write PLAINTEXT databases (control / evaluation only)")
     args = ap.parse_args()
-    summary = generate(args.patients, args.seed, args.out, encrypt=not args.no_encrypt)
+    n = args.patients if args.patients is not None or args.source == "synthea" else 5000
+    summary = generate(n, args.seed, args.out, encrypt=not args.no_encrypt, source=args.source,
+                       synthea_csv=args.synthea_csv or None)
     print(json.dumps(summary, indent=2))
 
 

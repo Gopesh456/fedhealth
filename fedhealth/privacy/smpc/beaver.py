@@ -17,7 +17,9 @@ BEAVER'S TRICK (offline/online split)
 TRUST
     The dealer knows x, y, z but never sees d and e (parties open them to each other, not to the dealer),
     so it cannot recover a or b. If the dealer colludes with a computing party it can (documented in
-    THREAT_MODEL.md). In this project the coordinator plays the dealer.
+    THREAT_MODEL.md). In this project the dealer is a third HOSPITAL that does not compute (protocol.assign_roles);
+    the coordinator holds no triple material. protocol.deal is the two-party, seed-compressed version used by the
+    services; deal_triples below is the general n-party textbook form.
 """
 from __future__ import annotations
 

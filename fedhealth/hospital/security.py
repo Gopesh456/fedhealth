@@ -36,6 +36,8 @@ def control_only(request: Request) -> None:
 
 def require_peer(request: Request, claimed_sender: str) -> None:
     """Data-plane check: the authenticated caller must BE the hospital it says it is (and not this hospital)."""
+    if claimed_sender == request.app.state.hospital_id:
+        raise HTTPException(403, "a hospital does not send data-plane messages to itself")
     caller = authenticated_caller(request)
     if request.app.state.service_verifier is not None and caller != hospital_service_id(claimed_sender):
         raise HTTPException(403, "sender does not match the authenticated caller")

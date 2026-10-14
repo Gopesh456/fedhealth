@@ -31,10 +31,12 @@ WHAT EACH PARTY LEARNS
 WHAT THIS DOES NOT PROTECT (see THREAT_MODEL.md)
     * Honest-but-curious parties only. A malicious party could cheat (e.g. submit a made-up list to probe
       for a specific patient). Membership of the intersection is revealed to its members by design.
-    * List sizes leak. Colluding parties can combine what they see.
+    * List sizes leak unless padded with dummies; the order of `ids` leaks to the last ring hop unless shuffled
+      (the hospital service does both). Colluding parties can combine what they see.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from .group import Group, get_group, pack_ints, unpack_ints
@@ -83,8 +85,9 @@ class PsiParty:
         return self.encrypt_list(self.elements)
 
     def publish(self) -> list[bytes]:
-        """Tags of the fully encrypted list, SORTED so the order of transmission leaks nothing about the
-        order of this party's patients."""
+        """Tags of the fully encrypted list, sorted. Sorting alone does NOT hide the order of this party's patients:
+        the previous party in the ring computed the fully encrypted list in the order it was sent and can tag it
+        itself. The hospital service therefore shuffles `ids` before creating the party (routes_psi.init)."""
         assert self.final_elements is not None, "own list has not come back round the ring yet"
         self.tags = [self.group.tag(e) for e in self.final_elements]
         return sorted(self.tags)
@@ -99,8 +102,14 @@ class PsiParty:
         linked = sorted(common)                        # identical at every party
         position = {t: i for i, t in enumerate(linked)}
         self.mapping = {pid: position[t] for pid, t in zip(self.ids, self.tags) if t in position}
-        import hashlib
-        self.linked_digest = hashlib.sha256(b"".join(linked)).digest()[:8]
+        # Agreement check for the coordinator: a hash of EVERY party's published tag set, in ring order. Every party holds
+        # all of them, so the digest is identical everywhere, and it determines the linked index. (A hash of the linked
+        # index alone would be the constant sha256(b"") whenever the intersection is empty, telling the coordinator so.)
+        h = hashlib.sha256(b"fedhealth/psi-linked/v1")
+        for name in self.ring:
+            tags = sorted(self.tags) if name == self.name else sorted(peer_tags[name])
+            h.update(len(tags).to_bytes(4, "big") + b"".join(tags))
+        self.linked_digest = h.digest()[:8]
         # forward secrecy of the session: the key and all intermediate lists are no longer needed
         self.key, self.elements, self.final_elements = None, [], None
         return len(linked)

@@ -14,6 +14,7 @@ indicator vectors over the common index.
 from __future__ import annotations
 
 import base64
+import secrets
 import threading
 from dataclasses import dataclass, field
 from typing import Annotated
@@ -23,9 +24,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from fedhealth.common.config import load_topology
 from fedhealth.common.wire import LINKAGE_ID_PATTERN, PsiFinalizeResult, PsiInbox, PsiInit, PsiStep, PsiTags
 from fedhealth.hospital import models as m
 from fedhealth.hospital import security
+from fedhealth.hospital.deadlines import guarded
 from fedhealth.privacy.linkage.group import get_group, pack_ints, unpack_ints
 from fedhealth.privacy.linkage.psi import PsiParty
 
@@ -45,8 +48,8 @@ class PsiSession:
 @dataclass
 class Linkage:
     ring: list[str]
-    mapping: dict[str, int]       # national_id -> index in the common linked index (stays local)
-    m: int
+    mapping: dict[str, int]       # national_id -> index in the common linked index (stays local; len = true m_S)
+    size: int                     # length of the linked index: the public padding bound, indices >= m_S are empty
 
 
 @dataclass
@@ -88,8 +91,17 @@ def make_router(hospital_id: str, get_session, allowed_groups: tuple[str, ...]) 
             raise HTTPException(400, f"group {body.group!r} not accepted by this hospital")
         if lid in state.sessions or lid in state.linkages:
             raise HTTPException(409, "linkage id already used")
-        ids = [r[0] for r in session.execute(select(patient_model.national_id).order_by(patient_model.patient_id))]
-        state.sessions[lid] = PsiSession(PsiParty(hospital_id, list(body.ring), ids, get_group(body.group)))
+        with guarded(request, request.app.state.deadlines.psi_init, "psi init"):   # the true list must not show in the timing
+            ids = [r[0] for r in session.execute(select(patient_model.national_id))]
+            bound = load_topology().link_pad_to
+            if len(ids) > bound:
+                raise HTTPException(409, "this hospital's patient list exceeds the public linkage bound (linkage.pad_to)")
+            ids += [f"PAD-{secrets.token_hex(16)}" for _ in range(bound - len(ids))]   # random dummies never match
+            # Fresh random order: the last ring hop sees this list (fully encrypted) in the order it was sent, and could
+            # match it against the published tags - in MRN order that would reveal each shared patient's record number.
+            secrets.SystemRandom().shuffle(ids)
+            state.sessions[lid] = PsiSession(PsiParty(hospital_id, list(body.ring), ids, get_group(body.group)))
+            session.close()
         return {"status": "ready"}              # deliberately NOT returning |set| to the coordinator
 
     @control.post("/psi/{lid}/step")
@@ -119,10 +131,10 @@ def make_router(hospital_id: str, get_session, allowed_groups: tuple[str, ...]) 
         if body.sender != party.prev_party:
             raise HTTPException(403, "messages are only accepted from the previous party in the ring")
         elements = unpack_ints(base64.b64decode(body.blob), party.group.nbytes)
+        if len(elements) != len(party.ids):                             # every list is padded to the same public size
+            raise HTTPException(400, "list does not have the public padded length")
         with s.lock:
             if body.round == n:                                        # our own list, now encrypted by everyone
-                if len(elements) != len(party.ids):
-                    raise HTTPException(400, "returned list has the wrong length")
                 party.final_elements = elements
             else:
                 s.inbox[body.round] = elements
@@ -160,17 +172,21 @@ def make_router(hospital_id: str, get_session, allowed_groups: tuple[str, ...]) 
         missing = [o for o in party.ring if o != hospital_id and o not in s.peer_tags]
         if missing or party.tags is None:
             raise HTTPException(409, f"waiting for tags from {missing}" if missing else "publish first")
-        with s.lock:
-            size = party.finalize(s.peer_tags)
+        with guarded(request, request.app.state.deadlines.psi_finalize, "psi finalize"), s.lock:
+            party.finalize(s.peer_tags)                                # the true m_S stays here
+            size = len(party.ids)                                      # = the public bound
             state.linkages[lid] = Linkage(list(party.ring), party.mapping, size)
             state.sessions.pop(lid, None)                              # key + intermediate lists are gone
-        return PsiFinalizeResult(m=size, digest=party.linked_digest.hex())
+        return PsiFinalizeResult(size=size, digest=party.linked_digest.hex())
 
     @control.delete("/psi/{lid}")
     def delete(request: Request, lid: LinkageId) -> dict:
         state: PsiState = request.app.state.psi
-        state.sessions.pop(lid, None)
-        state.linkages.pop(lid, None)
+        # freeing the true cohort's mapping takes time that grows with it: answer at the finalize deadline
+        with guarded(request, request.app.state.deadlines.psi_finalize, "psi delete"):
+            session = state.sessions.pop(lid, None)
+            linkage = state.linkages.pop(lid, None)
+            del session, linkage
         return {"status": "deleted"}
 
     router = APIRouter()

@@ -14,6 +14,11 @@ WHAT WE MEASURE
       real release stage, 100 independent attackers per point), and the total epsilon they would have burned,
     * attacker WITH the ledger, driven through the REAL pipeline (QueryService): how many queries are answered,
       where the first refusal happens, and the accuracy they are stuck with afterwards.
+
+The k-threshold is applied to the NOISY count, so an answer can come back suppressed even though the true count is
+above k. The attacker simply averages the answers that were released (a suppressed answer still costs budget). The
+noise on each answer is the SUM of the hospitals' shares (see coordinator/release.py), so its spread is taken from
+the noise plan rather than from a single Laplace draw.
 """
 from __future__ import annotations
 
@@ -25,21 +30,26 @@ import numpy as np
 
 from common import ExactOracle, common_args, oracle_from_args, save_json, seeded_randbelow
 from fedhealth.common.schemas import QuerySpec
-from fedhealth.coordinator.release import PrivacyParams, ReleasePolicy, release
+from fedhealth.coordinator.release import PrivacyParams, ReleasePolicy, plan_noise, release
 from fedhealth.coordinator.service import QueryService
 from fedhealth.privacy.dp.ledger import EpsilonLedger, make_engine
-from fedhealth.privacy.dp.mechanisms import LaplaceMechanism
 
 SPEC = QuerySpec.model_validate({"agg": "count", "condition": "E11", "a": {"age_min": 40, "age_max": 65},
                                  "b": {"outcome": "improved"}, "c": {"drug": "metformin"}})
 CHECKPOINTS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
 
 
-def theory_mean_abs_error(eps: float, n: int) -> float:
-    """E|mean of n discrete-Laplace draws| ~ sqrt(2/pi) * sd / sqrt(n)  (CLT; good for n >= ~5)."""
-    a = math.exp(-eps)
-    sd = math.sqrt(2 * a) / (1 - a)
-    return math.sqrt(2 / math.pi) * sd / math.sqrt(n)
+def theory_mean_abs_error(sd: float, n: int) -> float:
+    """E|mean of n independent noise draws of std sd| ~ sqrt(2/pi) * sd / sqrt(n)  (CLT; good for n >= ~5)."""
+    return math.sqrt(2 / math.pi) * sd / math.sqrt(max(n, 1))
+
+
+def running_mean(draws: np.ndarray) -> np.ndarray:
+    """Running average of the released answers; suppressed answers (nan) are skipped, not counted as zero."""
+    seen = ~np.isnan(draws)
+    total = np.cumsum(np.where(seen, draws, 0.0))
+    n = np.cumsum(seen)
+    return np.divide(total, n, out=np.full(len(draws), np.nan), where=n > 0)
 
 
 def run(oracle: ExactOracle, eps: float = 0.5, budget: float = 10.0, attackers: int = 100, max_n: int = 1000, seed: int = 3) -> dict:
@@ -49,12 +59,16 @@ def run(oracle: ExactOracle, eps: float = 0.5, budget: float = 10.0, attackers: 
     # --- 1. unlimited attacker (no ledger): noise averages away -------------------------------------------------
     rb = seeded_randbelow(seed)
     policy, privacy = ReleasePolicy(), PrivacyParams(epsilon=eps)
-    sums = np.zeros((attackers, max_n))
+    plan = plan_noise(SPEC, privacy, policy)
+    sd = plan.std(0)
+    means = np.zeros((attackers, max_n))
+    suppressed = 0
     for a in range(attackers):
-        draws = np.array([release(SPEC, exact, privacy, policy, rb).value for _ in range(max_n)], dtype=float)
-        sums[a] = np.cumsum(draws) / np.arange(1, max_n + 1)
-    unlimited = [{"queries": n, "mean_abs_error": float(np.mean(np.abs(sums[:, n - 1] - truth))),
-                  "theory": theory_mean_abs_error(eps, n), "epsilon_spent": n * eps} for n in CHECKPOINTS if n <= max_n]
+        values = [release(SPEC, exact, privacy, policy, rb).value for _ in range(max_n)]
+        suppressed += sum(v is None for v in values)
+        means[a] = running_mean(np.array([np.nan if v is None else v for v in values], dtype=float))
+    unlimited = [{"queries": n, "mean_abs_error": float(np.nanmean(np.abs(means[:, n - 1] - truth))),
+                  "theory": theory_mean_abs_error(sd, n), "epsilon_spent": n * eps} for n in CHECKPOINTS if n <= max_n]
 
     # --- 2. the same attacker against the ledger, through the REAL pipeline -------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
@@ -68,19 +82,24 @@ def run(oracle: ExactOracle, eps: float = 0.5, budget: float = 10.0, attackers: 
             statuses.append(out.status)
             if out.status == "released":
                 answers.append(out.released.value)
-            elif first_refusal is None:
+            elif out.status == "refused" and first_refusal is None:
                 first_refusal = i
         spent = ledger.balance("attacker").spent_epsilon
         engine.dispose()                                                # release the file (Windows cannot delete an open DB)
+    charged = statuses.count("released") + statuses.count("suppressed")
     estimate = float(np.mean(answers))
-    limited = {"budget": budget, "epsilon_per_query": eps, "attempted": len(statuses), "answered": len(answers),
+    limited = {"budget": budget, "epsilon_per_query": eps, "attempted": len(statuses), "answered": charged,
+               "released": len(answers), "suppressed": statuses.count("suppressed"),
                "refused": statuses.count("refused"), "first_refusal_at_query": first_refusal, "epsilon_spent": spent,
                "final_estimate": estimate, "final_abs_error": abs(estimate - truth),
-               "expected_abs_error_at_that_point": theory_mean_abs_error(eps, len(answers))}
+               "expected_abs_error_at_that_point": theory_mean_abs_error(sd, len(answers))}
     return {"attack": "budget exhaustion", "query": "count(E11, age 40-65, metformin, improved)", "true_value": truth,
             "epsilon_per_query": eps, "attackers_simulated": attackers, "unlimited": unlimited, "with_ledger": limited,
-            "single_query_expected_abs_error": LaplaceMechanism(eps, 1).expected_abs_error,     # exact, not the CLT approximation
-            "note": "theory = CLT approximation of E|mean|, accurate for N >= ~50; N=1 is exactly single_query_expected_abs_error"}
+            "noise_contributors": plan.contributors, "honest_shares": plan.honest, "noise_std": sd,
+            "suppressed_fraction_unlimited": suppressed / (attackers * max_n),
+            "single_query_expected_abs_error": plan.expected_abs_error(0),     # exact, not the CLT approximation
+            "note": "theory = CLT approximation of E|mean|, accurate for N >= ~50; N=1 is exactly single_query_expected_abs_error. "
+                    "Suppressed answers (noisy count below k) are skipped by the attacker but still cost budget."}
 
 
 def main() -> None:
@@ -95,7 +114,8 @@ def main() -> None:
     for r in out["unlimited"]:
         print(f"  {r['queries']:>10}{r['epsilon_spent']:>16.1f}{r['mean_abs_error']:>28.3f}{r['theory']:>9.3f}")
     l = out["with_ledger"]
-    print(f"  WITH the ledger (budget {l['budget']}): {l['answered']} of {l['attempted']} attempts answered, first refusal at query "
+    print(f"  WITH the ledger (budget {l['budget']}): {l['answered']} of {l['attempted']} attempts answered "
+          f"({l['suppressed']} of them suppressed), first refusal at query "
           f"{l['first_refusal_at_query']}, epsilon spent {l['epsilon_spent']}; final estimate error {l['final_abs_error']:.2f} "
           f"(expected ~{l['expected_abs_error_at_that_point']:.2f}) - stuck there for good.")
     print(f"saved {path}")

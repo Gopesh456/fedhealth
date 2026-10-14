@@ -10,7 +10,8 @@
 
 Order of events for a query (each step can end the request, and EVERY ending is audited):
     authenticate -> validate (aggregates only, closed vocabulary) -> authorise (role, mechanism, epsilon cap)
-    -> private pipeline (reserve budget, PSI, MPC, k-threshold, noise, commit) -> audit -> respond.
+    -> private pipeline (reserve budget, PSI, MPC with the noise added inside it, k-threshold on the noisy count,
+       commit) -> audit -> respond.
 The audit entry is written BEFORE the response is returned; if it cannot be written, the answer is withheld.
 """
 from __future__ import annotations
@@ -55,6 +56,7 @@ class QueryResponse(BaseModel):
     hospitals: list[str]
     epsilon_spent: float
     delta_spent: float
+    rho_spent: float = 0.0
     epsilon_remaining: float | None
     audit_seq: int
 
@@ -133,7 +135,7 @@ def mount_secure_api(app: FastAPI, ctx: SecureContext) -> None:
             result=rel.value if rel else None, suppressed=rel.suppressed if rel else None,
             mechanism=rel.mechanism if rel else None, noise_scale=rel.noise_scale if rel else None,
             expected_abs_error=rel.expected_abs_error if rel else None, hospitals=outcome.hospitals,
-            epsilon_spent=outcome.epsilon_charged, delta_spent=outcome.delta_charged,
+            epsilon_spent=outcome.epsilon_charged, delta_spent=outcome.delta_charged, rho_spent=outcome.rho_charged,
             epsilon_remaining=outcome.epsilon_remaining, audit_seq=seq)
 
     # ------------------------------------------------------------------ introspection
@@ -142,15 +144,17 @@ def mount_secure_api(app: FastAPI, ctx: SecureContext) -> None:
         rp = ctx.policy.role(claims.role)
         return {"username": claims.sub, "role": claims.role, "can_query": rp.can_query, "aggs": sorted(rp.aggs),
                 "mechanisms": sorted(rp.mechanisms), "max_epsilon_per_query": rp.max_epsilon_per_query,
-                "k_threshold": ctx.policy.k_threshold, "audit_scope": rp.audit_scope, "can_verify_audit": rp.verify_audit}
+                "k_threshold": ctx.policy.k_threshold, "noise_tolerance": ctx.policy.noise_tolerance, "audit_scope": rp.audit_scope, "can_verify_audit": rp.verify_audit}
 
     @app.get("/v1/budget")
     def budget(claims: Claims = Depends(authenticate)) -> dict:
         rp = ctx.policy.role(claims.role)
         ctx.ledger.ensure_user(claims.sub, rp.total_epsilon, rp.total_delta)
         b = ctx.ledger.balance(claims.sub)
-        return {"total_epsilon": b.total_epsilon, "spent_epsilon": b.spent_epsilon, "remaining_epsilon": b.remaining_epsilon,
-                "remaining_delta": b.remaining_delta}
+        return {"total_epsilon": b.total_epsilon, "total_delta": b.total_delta, "spent_epsilon": b.spent_epsilon,
+                "remaining_epsilon": b.remaining_epsilon, "remaining_delta": b.remaining_delta,
+                "accountant": b.accountant, "rho_spent": b.rho, "rho_cap": b.rho_cap,
+                "basic_composition": {"epsilon": b.basic_epsilon, "delta": b.basic_delta}}
 
     @app.get("/v1/audit")
     def audit_read(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),

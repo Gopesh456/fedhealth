@@ -7,15 +7,27 @@ The coordinator never receives data-plane payloads; the models below make that v
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import hashlib
+import json
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .schemas import Agg, HospitalId, LocalQuery
 
 LINKAGE_ID_PATTERN = r"^[0-9a-f]{8,64}$"
+SESSION_DIGEST_PATTERN = r"^[0-9a-f]{32}$"
 
 
 class _Wire(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+def _distinct(v: list) -> list:
+    """A hospital may appear once: listed twice it could, e.g., be both dealer and computer of one computation."""
+    if len(set(v)) != len(v):
+        raise ValueError("a hospital is listed more than once")
+    return v
 
 
 # ------------------------------------------------------------------ PSI control plane
@@ -23,13 +35,15 @@ class PsiInit(_Wire):
     ring: list[HospitalId] = Field(min_length=2, max_length=3)
     group: str = "modp2048"
 
+    _ring_distinct = field_validator("ring")(_distinct)
+
 
 class PsiStep(_Wire):
     round: int = Field(ge=1, le=3)
 
 
 class PsiFinalizeResult(_Wire):
-    m: int            # size of the linked cohort (the one number the coordinator learns)
+    size: int         # length of the linked index = the PUBLIC padding bound, never the true cohort size m_S
     digest: str       # hash of the common index; lets the coordinator check all hospitals agree
 
 
@@ -47,22 +61,49 @@ class PsiTags(_Wire):
 
 # ------------------------------------------------------------------ INSECURE linked baseline (dev/eval only)
 # ------------------------------------------------------------------ MPC control plane (coordinator -> hospital)
+class MpcNoiseCell(_Wire):
+    sensitivity: int = Field(ge=1)
+    s: int = Field(default=1, ge=1)          # laplace: total noise P(x) ~ exp(-|x| s/t)
+    t: int = Field(default=1, ge=1)
+    sigma2: str = "0"                        # gaussian: per-share variance, an exact fraction "p/q"
+
+
+class MpcNoise(_Wire):
+    """The public noise plan (privacy/dp/distributed.py). Every involved hospital re-checks it against its own cap,
+    samples its OWN share from it and feeds that share into the computation."""
+    mechanism: Literal["laplace", "gaussian"]
+    contributors: int = Field(ge=1, le=3)
+    honest: int = Field(ge=1, le=3)
+    cells: list[MpcNoiseCell] = Field(min_length=1, max_length=64)
+    groups: list[tuple[int, int]] = Field(min_length=1, max_length=4)
+    epsilon: float = Field(ge=0)
+    delta: float = Field(ge=0)
+    rho: float = Field(ge=0)
+
+
 class MpcPrepare(_Wire):
-    """Tells a hospital which computation it takes part in. `query` is ITS OWN predicate slice only."""
-    parties: list[HospitalId] = Field(min_length=1, max_length=3)    # computing hospitals; order = share index
+    """Tells a hospital which computation it takes part in. `query` is ITS OWN predicate slice only (None for a dealer
+    that holds no input)."""
+    parties: list[HospitalId] = Field(min_length=1, max_length=3)    # input hospitals, ring order
     owner: HospitalId                                                # holds the output vectors
+    computers: list[HospitalId] = Field(default_factory=list, max_length=2)   # P0, P1 (empty for one hospital)
+    dealer: HospitalId | None = None                                 # makes the triples
     agg: Agg
     t_outputs: int = Field(ge=1, le=64)                              # number of output cells (public query shape)
-    m: int = Field(ge=0)                                             # linked-cohort size (0 when only one hospital)
+    m: int = Field(ge=0, le=1_000_000)                               # length of the padded linked index (0: one hospital)
     lid: str | None = Field(default=None, pattern=LINKAGE_ID_PATTERN)
-    query: LocalQuery
+    query: LocalQuery | None = None
+    noise: MpcNoise | None = None                                    # None = exact (insecure evaluation route only)
 
+    _parties_distinct = field_validator("parties", "computers")(_distinct)
 
-class MpcTriples(_Wire):
-    """This party's shares of the dealer's Beaver triples (base64 of 8-byte field elements)."""
-    x: str
-    y: str
-    z: str
+    def header_digest(self, sid: str) -> str:
+        """Hash of everything every involved hospital must have been told IDENTICALLY (all but its own query slice).
+        It travels in every hospital-to-hospital message of the computation, and the computers refuse a mismatch, so
+        the coordinator cannot give different hospitals different plans, shapes or roles."""
+        header = self.model_dump(mode="json", exclude={"query"})
+        blob = json.dumps({"sid": sid, **header}, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(b"fedhealth/mpc-header/v1|" + blob).hexdigest()[:32]
 
 
 class MpcLayer(_Wire):
@@ -70,19 +111,32 @@ class MpcLayer(_Wire):
 
 
 class MpcOutput(_Wire):
-    """The ONLY thing a hospital returns to the coordinator at the end: one additive share per output cell.
-    On its own each share is uniformly random (for >= 2 hospitals)."""
+    """The ONLY thing a computing hospital returns to the coordinator at the end: one additive share per output cell
+    of  exact + noise. On its own each share is uniformly random (for >= 2 hospitals)."""
     shares: list[int]
 
 
 # ------------------------------------------------------------------ MPC data plane (hospital -> hospital)
 class MpcInShare(_Wire):
     sender: HospitalId
+    session: str = Field(pattern=SESSION_DIGEST_PATTERN)   # MpcPrepare.header_digest: binds the message to one header
     vectors: list[str]        # one base64 blob per vector the sender owns (this recipient's shares of them)
+    noise: str | None = None  # this recipient's share of the sender's noise vector
+
+
+class MpcInTriples(_Wire):
+    """Dealer -> computer. P0 gets a 32-byte seed it expands itself; P1 gets its shares explicitly."""
+    sender: HospitalId
+    session: str = Field(pattern=SESSION_DIGEST_PATTERN)   # MpcPrepare.header_digest: binds the message to one header
+    seed: str | None = None   # base64
+    x: str | None = None
+    y: str | None = None
+    z: str | None = None
 
 
 class MpcInOpen(_Wire):
     sender: HospitalId
+    session: str = Field(pattern=SESSION_DIGEST_PATTERN)   # MpcPrepare.header_digest: binds the message to one header
     layer: int = Field(ge=0, le=8)
     d: str                    # sender's share of  a - x
     e: str                    # sender's share of  b - y

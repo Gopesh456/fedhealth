@@ -2,10 +2,12 @@
 
 HOW THE ATTACKS RUN
     The attacker's only interface is the system's own query path. For every DISTINCT query an attack needs, the
-    full pipeline (PSI linkage -> secret-shared MPC) is run once to get the exact aggregate - and it is checked
-    against the independent ground truth. The privacy-relevant part, `release()` (k-threshold + noise), is then
-    applied with FRESH randomness for every simulated query: that is exactly what repeating the query against the
-    live service does, because the MPC output is deterministic and only the noise is re-drawn.
+    full pipeline (PSI linkage -> secret-shared MPC) is run once WITHOUT noise to get the exact aggregate - the
+    evaluation-only exact route, which hospitals accept only with the insecure baseline enabled - and it is checked
+    against the independent ground truth. The privacy-relevant part, `release()` (three hospitals' noise shares drawn
+    with the hospitals' own exact samplers, k-threshold on the noisy count), is then applied with FRESH randomness for
+    every simulated query: that is exactly what repeating the query against the live service does, because the
+    MPC's exact part is deterministic and only the noise shares are re-drawn.
 """
 from __future__ import annotations
 
@@ -31,18 +33,22 @@ RESULTS_DIR = ROOT / "evaluation" / "results"
 CHARTS_DIR = ROOT / "evaluation" / "charts"
 
 
-def world_dir(n: int, seed: int) -> Path:
-    return ROOT / "evaluation" / ".world" / f"n{n}_s{seed}"
+SOURCES = ("synthea", "synthetic")
 
 
-def ensure_world(n: int = 5000, seed: int = 42) -> Path:
-    """Generate (once) the synthetic world used by the evaluation. Keys come from the secrets directory."""
-    d = world_dir(n, seed)
+def world_dir(n: int, seed: int, source: str = "synthea") -> Path:
+    return ROOT / "evaluation" / ".world" / (f"n{n}_s{seed}" if source == "synthetic" else f"{source}_n{n}_s{seed}")
+
+
+def ensure_world(n: int = 5000, seed: int = 42, source: str = "synthea") -> Path:
+    """Generate (once) the world used by the evaluation: n Synthea people (from the shipped extract in ./synthea) or
+    n people from the parametric generator. Keys come from the secrets directory."""
+    d = world_dir(n, seed, source)
     # regenerate if missing OR stale (a cache from before the federated-learning registries existed)
     if not (d / "hospital_c.db").exists() or not (d / "ground_truth" / "registry_C.csv").exists():
         bootstrap_secrets()
         d.mkdir(parents=True, exist_ok=True)
-        generate(n, seed, d)
+        generate(n, seed, d, source=source)
     return d
 
 
@@ -50,7 +56,7 @@ class ExactOracle:
     """Exact aggregates through the REAL private pipeline (PSI + MPC), cached per distinct query."""
 
     def __init__(self, world: Path, psi_group: str = "modp2048"):
-        self.system = build_system(world, psi_group=psi_group, psi_groups=(psi_group,), allow_insecure=False)
+        self.system = build_system(world, psi_group=psi_group, psi_groups=(psi_group,), allow_insecure=True)
         self.orchestrator = self.system.orchestrator
         self.gt = GroundTruth(world / "ground_truth")
         self._cache: dict[str, Exact] = {}
@@ -59,7 +65,7 @@ class ExactOracle:
     def exact(self, spec: QuerySpec) -> Exact:
         key = spec.model_dump_json()
         if key not in self._cache:
-            run = self.orchestrator.mpc_run(spec)
+            run = self.orchestrator.mpc_run(spec, None)                  # exact route (no noise plan)
             self.pipeline_runs += 1
             ex = exact_from_cells(spec, run.cells, run.categories)
             if spec.agg == "count":                       # the private pipeline must agree with the independent truth
@@ -99,6 +105,8 @@ def common_args(description: str):
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--patients", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--source", choices=SOURCES, default="synthea",
+                    help="synthea (default: the shipped Synthea extract) or the parametric synthetic generator")
     ap.add_argument("--fast", action="store_true",
                     help="use the INSECURE 768-bit PSI group (speed only) and 1,000 patients")
     return ap
@@ -106,4 +114,4 @@ def common_args(description: str):
 
 def oracle_from_args(args) -> ExactOracle:
     n = 1000 if args.fast else args.patients
-    return ExactOracle(ensure_world(n, args.seed), psi_group="test768" if args.fast else "modp2048")
+    return ExactOracle(ensure_world(n, args.seed, args.source), psi_group="test768" if args.fast else "modp2048")

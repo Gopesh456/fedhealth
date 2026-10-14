@@ -110,7 +110,7 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, default=8)
     args = ap.parse_args()
     n = 1000 if args.fast else args.patients
-    out = run(ensure_world(n, args.seed), args.seeds)
+    out = run(ensure_world(n, args.seed, args.source), args.seeds)
     path = save_json("federated", out)
     a = out["auc"]
     print(f"rows per hospital (train/test): {out['rows_per_hospital']}   mean age: { {h: round(v, 1) for h, v in out['mean_age'].items()} }")

@@ -91,7 +91,7 @@ def create_coordinator_app(hospital_clients: dict[str, httpx.Client] | None = No
         ctx = SecureContext(
             users=users, tokens=TokenAuthority(secrets.jwt_secret, pol.jwt_ttl_seconds), policy=pol, ledger=ledger,
             audit=AuditLog(engine, secrets.audit_key),
-            service=QueryService(orch, ledger, ReleasePolicy(pol.k_threshold, pol.k_basis)),
+            service=QueryService(orch, ledger, ReleasePolicy(k=pol.k_threshold, tolerance=pol.noise_tolerance)),
             throttle=LoginThrottle())
         mount_secure_api(app, ctx)
         app.state.secure = ctx

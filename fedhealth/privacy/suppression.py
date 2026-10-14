@@ -8,11 +8,11 @@ HOW WE APPLY IT
     * COUNT / SUM / AVG: the *cohort* (number of patients behind the answer) must be >= k, else the answer is
       withheld. For SUM and AVG this is the patient COUNT, not the value of the sum.
     * HISTOGRAM: each bin is checked on its own; small bins are replaced by "suppressed".
-    * The check uses the EXACT count by default (k_basis="exact", as specified). Honest limitation: whether a
-      result was suppressed is itself one bit of information about the exact count ("< k"), and it is NOT covered
-      by the differential-privacy guarantee. k_basis="noisy" tests the noisy value instead: that is pure
-      post-processing and stays inside the DP guarantee, at the cost of occasionally releasing/suppressing
-      the wrong side of the boundary. The privacy budget is charged either way.
+    * The check is applied to the NOISY count. The noise is added inside the secure computation, so no exact count
+      exists anywhere outside the MPC: the suppress/release decision is post-processing of a differentially private
+      value and is covered by the DP guarantee (earlier versions tested the exact count, which leaked "count < k"
+      outside DP). The price is a fuzzy boundary: a true count of 10 is occasionally suppressed, a true 9 occasionally
+      released. The privacy budget is charged either way.
 
 ON ITS OWN THE K-THRESHOLD DOES NOT STOP DIFFERENCING ATTACKS: two LARGE queries that differ by one patient are
 both released. That is exactly why differential privacy is added (see attacks/differencing.py).

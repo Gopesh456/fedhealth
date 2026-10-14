@@ -12,6 +12,7 @@ Phase 1 baseline ships these rows to the coordinator (insecure!); from Phase 3 o
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
@@ -30,11 +31,14 @@ class MatchRow:
     category: str | None
 
 
-def _scaled(q: LocalQuery, raw: float) -> int:
-    """Scale to an integer (secret sharing works over integers) and clamp to the declared bounds."""
+def _scaler(q: LocalQuery) -> Callable[[float], int] | None:
+    """Scale to an integer (secret sharing works over integers) and clamp to the declared bounds. Looked up once per
+    query, not per row: the per-row lookup was most of an AVG's prepare time, which must stay well inside its deadline."""
+    if q.value_field is None:
+        return None
     lo, hi = value_bounds(q.value_field, q.condition)
     scale = load_fields().value_fields[q.value_field].scale
-    return max(lo, min(hi, int(round(raw * scale))))
+    return lambda raw: max(lo, min(hi, int(round(raw * scale))))
 
 
 def run_local_query(session: Session, q: LocalQuery) -> list[MatchRow]:
@@ -55,10 +59,10 @@ def _run_a(session: Session, q: LocalQuery) -> list[MatchRow]:
     if pred.age_max is not None:
         stmt = stmt.where(m.APatient.birth_year >= vocab.AS_OF.year - pred.age_max)
 
-    rows = []
+    rows, scaled = [], _scaler(q)
     for pid, nid, birth_year, sex in session.execute(stmt.order_by(m.APatient.patient_id)):
         age = vocab.age_of(birth_year)
-        value = _scaled(q, age) if q.value_field == "age" else None
+        value = scaled(age) if q.value_field == "age" else None
         category = {"sex": sex, "age_band": vocab.age_band_of(age)}.get(q.group_by) if q.group_by else None
         rows.append(MatchRow(pid, nid, value, category))
     return rows
@@ -73,12 +77,12 @@ def _run_b(session: Session, q: LocalQuery) -> list[MatchRow]:
     if pred.outcome is not None:
         stmt = stmt.where(m.BFollowupOutcome.outcome == pred.outcome)
 
-    rows, seen = [], set()
+    rows, seen, scaled = [], set(), _scaler(q)
     for pid, nid, outcome, delta in session.execute(stmt.order_by(m.BPatient.patient_id, m.BFollowupOutcome.outcome_id)):
         if pid in seen:          # one follow-up per (patient, condition) by construction; stay safe regardless
             continue
         seen.add(pid)
-        value = _scaled(q, delta) if q.value_field == "lab_delta" else None
+        value = scaled(delta) if q.value_field == "lab_delta" else None
         category = outcome if q.group_by == "outcome" else None
         rows.append(MatchRow(pid, nid, value, category))
     return rows
@@ -93,7 +97,7 @@ def _run_c(session: Session, q: LocalQuery) -> list[MatchRow]:
     if pred.drug is not None:
         stmt = stmt.where(m.CPrescription.drug_name == pred.drug)
 
-    rows, seen = [], set()
+    rows, seen, scaled = [], set(), _scaler(q)
     # A patient may have two prescriptions for one condition. Keep the EARLIEST matching one so every
     # patient lands in exactly one histogram bin (this also keeps the DP sensitivity of a histogram at 1).
     for pid, nid, drug, adherence in session.execute(
@@ -101,7 +105,7 @@ def _run_c(session: Session, q: LocalQuery) -> list[MatchRow]:
         if pid in seen:
             continue
         seen.add(pid)
-        value = _scaled(q, adherence) if q.value_field == "adherence_pct" else None
+        value = scaled(adherence) if q.value_field == "adherence_pct" else None
         category = drug if q.group_by == "drug" else None
         rows.append(MatchRow(pid, nid, value, category))
     return rows

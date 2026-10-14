@@ -96,6 +96,20 @@ def test_a_bad_password_is_rejected(app):
     assert any("invalid" in e.value.lower() for e in app.sidebar.error) and not app.tabs
 
 
+def test_a_count_without_any_filter_cannot_be_sent_and_says_why(app, dash):
+    """The form opens with no filter, and a count with no filter involves no hospital: the button says so instead of
+    sending a query the coordinator would reject."""
+    login(app, "researcher1")
+    assert app.button(key="run").disabled and any("at least one filter" in i.value for i in app.info)
+    app.selectbox(key="outcome").select("improved").run()
+    assert not app.button(key="run").disabled
+    c = CoordinatorClient(dash.system.client)
+    c.login("researcher1", "pw-researcher1")
+    with pytest.raises(ApiError) as exc:
+        c.query({"agg": "count", "condition": "E11"}, 0.5, "laplace")
+    assert exc.value.status == 422 and "at least one hospital" in exc.value.message      # the reason, not only "invalid"
+
+
 def test_a_researcher_builds_and_runs_a_query_and_sees_the_budget_move(app, dash):
     login(app, "researcher1")
     assert not app.exception
@@ -106,7 +120,7 @@ def test_a_researcher_builds_and_runs_a_query_and_sees_the_budget_move(app, dash
     app.selectbox(key="treatment").select("metformin")
     app.selectbox(key="outcome").select("improved")
     app.checkbox(key="use_age").check().run()                                              # enables the (disabled) age slider
-    app.slider(key="age_range").set_value((40, 65))
+    app.slider(key="age_range").set_value((18, 90))                                          # true count 24: far above k
     app.slider(key="epsilon").set_value(1.0)
     app.run()
     app.button(key="run").click().run()
@@ -116,7 +130,7 @@ def test_a_researcher_builds_and_runs_a_query_and_sees_the_budget_move(app, dash
     assert spent.value == "1"
     assert app.sidebar.metric[0].value == "9.00"                                             # budget moved
     assert "True value" not in labels(app), "ground truth must not be visible outside demo mode"
-    truth = dash.gt.evaluate(headline_spec())
+    truth = dash.gt.evaluate(headline_spec(a={"age_min": 18, "age_max": 90}))
     shown = int(next(m for m in app.metric if m.label == "Noisy answer").value.replace(",", ""))
     assert abs(shown - truth) <= 15
 

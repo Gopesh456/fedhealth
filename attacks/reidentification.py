@@ -106,8 +106,7 @@ def main() -> None:
     ap.add_argument("--coverage", type=float, default=0.7, help="fraction of the world present in the auxiliary data")
     args = ap.parse_args()
     n = 1000 if args.fast else args.patients
-    ensure_world(n, args.seed)
-    out = run(world_dir(n, args.seed) / "ground_truth", args.coverage)
+    out = run(ensure_world(n, args.seed, args.source) / "ground_truth", args.coverage)
     path = save_json("attack_reidentification", out)
     print(f"Released table: {out['released_records']} Hospital-A patients, names removed.  Auxiliary data: {out['aux_records']} people.")
     print(f"  {'quasi-identifiers':<26}{'unique in release':>18}{'re-identified (correct)':>26}")

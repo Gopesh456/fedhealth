@@ -1,18 +1,26 @@
-"""The release stage: from the EXACT secret-shared result to what a requester is allowed to see.
+"""The release stage: from the requester's privacy request to the number they are allowed to see.
 
-    exact aggregate (only the coordinator can add the shares)
-        --> k-threshold   (is the cohort big enough to talk about at all?)
-        --> DP noise      (discrete Laplace / Gaussian, calibrated to the query's sensitivity)
-        --> post-process  (round, clamp counts >= 0; free under DP)
-        --> Released      (the only thing that ever leaves the coordinator)
+Since the noise moved INSIDE the secure computation, the coordinator never holds an exact aggregate. Its role here is
+(1) to PLAN the noise before the computation and (2) to post-process the already-noisy cells afterwards:
+
+    plan_noise   (requester's epsilon / mechanism + the query's sensitivity  ->  per-cell noise parameters, rho)
+        --> MPC  (every hospital adds one noise share as a secret-shared input; only  exact + noise  is opened)
+        --> finalize:
+              k-threshold   on the NOISY count (post-processing: covered by the DP guarantee, no side channel)
+              post-process  clamp counts >= 0, divide for AVG, clamp a mean to its bounds (free under DP)
+        --> Released     (the only thing that ever leaves the coordinator)
 
 SENSITIVITY  (how much can ONE patient change the exact answer? - patients are added/removed)
     COUNT          1
-    HISTOGRAM      1        every patient is in exactly ONE bin, so adding a patient changes ONE cell by 1
-                            (parallel composition): all bins together cost epsilon ONCE, not epsilon x bins
-    SUM            B        B = max |value| after clamping to the declared bounds (value_bounds)
-    AVG            via noisy SUM / noisy COUNT, each with epsilon/2 (post-processing the ratio is free)
-The clamping bounds are enforced hospital-side (predicate_runner._scaled), so B really bounds every contribution.
+    HISTOGRAM      1        every patient is in exactly ONE bin, so adding a patient changes ONE cell by 1:
+                            all bins together cost the budget ONCE (l1 = l2 sensitivity = 1)
+    SUM            B        B = max |value| after clamping to the declared bounds (value_bounds); a noisy COUNT is
+                            released alongside (budget split in two) because the k-threshold needs it
+    AVG            noisy SUM / noisy COUNT, each with half the budget (post-processing the ratio is free)
+The clamping bounds are enforced hospital-side (predicate_runner._scaler), so B really bounds every contribution.
+
+`release()` runs plan -> noise -> finalize in one process, drawing every hospital's share with the same exact
+samplers the hospitals use. The attack demos and tests use it to replay many releases of one exact answer.
 """
 from __future__ import annotations
 
@@ -20,14 +28,16 @@ import secrets
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fedhealth.common.config import load_fields
-from fedhealth.common.schemas import QuerySpec, value_bounds
-from fedhealth.privacy.dp.mechanisms import make_mechanism
+from fedhealth.common.config import load_fields, load_topology
+from fedhealth.common.schemas import QuerySpec, categories, participating_hospitals, value_bounds
+from fedhealth.privacy.dp.distributed import NoisePlan, make_plan
 from fedhealth.privacy.suppression import DEFAULT_K, is_suppressed
 
 DEFAULT_DELTA = 1e-6
+DEFAULT_TOLERANCE = 1
 
 
 class PrivacyParams(BaseModel):
@@ -49,17 +59,25 @@ class PrivacyParams(BaseModel):
 @dataclass(frozen=True)
 class ReleasePolicy:
     k: int = DEFAULT_K
-    k_basis: Literal["exact", "noisy"] = "exact"
-    dp_enabled: bool = True          # False = k-threshold ONLY, no noise. Attack demos / evaluation; never set by the API.
+    tolerance: int = DEFAULT_TOLERANCE  # hospitals that may collude with the coordinator and still not see past the noise
+    dp_enabled: bool = True             # False = k-threshold ONLY, no noise. Attack demos / evaluation; never set by the API.
 
 
 @dataclass
 class Exact:
-    """What the MPC reveals to the coordinator. NEVER returned to a requester."""
+    """An exact answer. Only the EVALUATION harness has one (it can ask the insecure exact route); the private
+    pipeline never does."""
     agg: str
     count: int | None = None                 # cohort size (count / sum / avg)
     total: int | None = None                 # scaled-integer total (sum / avg)
     cells: dict[str, int] | None = None      # histogram bins
+
+    def as_cells(self) -> list[int]:
+        if self.agg == "count":
+            return [self.count]
+        if self.agg in ("sum", "avg"):
+            return [self.count, self.total]
+        return list(self.cells.values())
 
 
 @dataclass
@@ -69,8 +87,9 @@ class Released:
     suppressed: bool | dict[str, bool]
     epsilon: float
     delta: float
+    rho: float
     mechanism: str
-    noise_scale: float                       # Laplace b = Delta/epsilon (or Gaussian sigma): public by design
+    noise_scale: float                       # std of the total noise on the released number: public by design
     expected_abs_error: float | None         # of the released number, in the released unit
 
     @property
@@ -88,54 +107,80 @@ def exact_from_cells(spec: QuerySpec, cells: list[int], categories: list[str]) -
     return Exact("histogram", cells=dict(zip(categories, cells, strict=True)))
 
 
-def release(spec: QuerySpec, exact: Exact, privacy: PrivacyParams, policy: ReleasePolicy = ReleasePolicy(),
-            randbelow=secrets.randbelow) -> Released:
-    eps, delta, name = privacy.epsilon, privacy.delta, privacy.mechanism
-    noisy_basis = policy.k_basis == "noisy"
+def noise_contributors(spec: QuerySpec) -> int:
+    """How many hospitals add a noise share: the lone data holder for a one-hospital query (it already knows its own
+    answer), otherwise the two computing hospitals plus the triple dealer (see smpc/protocol.py: assign_roles)."""
+    return 1 if len(participating_hospitals(spec)) == 1 else min(3, len(load_topology().ring))
 
-    def mech(e: float, d: float, sensitivity: int):
-        return make_mechanism(name if policy.dp_enabled else "none", e, sensitivity, d, randbelow)
 
-    # ------------------------------------------------------------------ COUNT
+def plan_noise(spec: QuerySpec, privacy: PrivacyParams, policy: ReleasePolicy = ReleasePolicy(),
+               contributors: int | None = None) -> NoisePlan:
+    c = noise_contributors(spec) if contributors is None else contributors
     if spec.agg == "count":
-        mc = mech(eps, delta, 1)
-        noisy = max(0, mc.release(exact.count))
-        hidden = is_suppressed(noisy if noisy_basis else exact.count, policy.k)
-        return Released("count", None if hidden else noisy, hidden, eps, delta, name, mc.scale, mc.expected_abs_error)
+        groups = [(1, 1)]
+    elif spec.agg == "histogram":
+        groups = [(len(categories(spec.group_by, spec.condition)), 1)]
+    else:
+        lo, hi = value_bounds(spec.value_field, spec.condition)
+        groups = [(1, 1), (1, max(abs(lo), abs(hi)))]           # [count, total]
+    mech = privacy.mechanism if policy.dp_enabled else "none"
+    return make_plan(mech, privacy.epsilon, privacy.delta, groups, c, policy.tolerance)
 
-    # ------------------------------------------------------------------ HISTOGRAM (parallel composition)
+
+def finalize(spec: QuerySpec, noisy: list[int], plan: NoisePlan, categories: list[str],
+             policy: ReleasePolicy = ReleasePolicy()) -> Released:
+    """k-threshold + post-processing of NOISY cells. Nothing here touches an exact value."""
+    name = plan.mechanism if policy.dp_enabled else "none"
+    eps, delta, rho = (plan.epsilon, plan.delta, plan.rho) if policy.dp_enabled else (0.0, 0.0, 0.0)
+
+    if spec.agg == "count":
+        v = max(0, int(noisy[0]))
+        hidden = is_suppressed(v, policy.k)
+        return Released("count", None if hidden else v, hidden, eps, delta, rho, name, plan.std(0), plan.expected_abs_error(0))
+
     if spec.agg == "histogram":
-        mc = mech(eps, delta, 1)
         values: dict[str, int | None] = {}
-        hidden: dict[str, bool] = {}
-        for bin_name, c in exact.cells.items():
-            noisy = max(0, mc.release(c))
-            hidden[bin_name] = is_suppressed(noisy if noisy_basis else c, policy.k)
-            values[bin_name] = None if hidden[bin_name] else noisy
-        return Released("histogram", values, hidden, eps, delta, name, mc.scale, mc.expected_abs_error)
+        hidden_bins: dict[str, bool] = {}
+        for b, c in zip(categories, noisy, strict=True):
+            v = max(0, int(c))
+            hidden_bins[b] = is_suppressed(v, policy.k)
+            values[b] = None if hidden_bins[b] else v
+        return Released("histogram", values, hidden_bins, eps, delta, rho, name, plan.std(0), plan.expected_abs_error(0))
 
-    # ------------------------------------------------------------------ SUM / AVG
-    fields = load_fields()
-    scale = fields.value_fields[spec.value_field].scale
-    lo, hi = value_bounds(spec.value_field, spec.condition)
-    bound = max(abs(lo), abs(hi))
-    split = spec.agg == "avg" or noisy_basis                    # a noisy count is needed -> budget is split in two
-    e_each, d_each = (eps / 2, delta / 2) if split else (eps, delta)
-
-    m_total = mech(e_each, d_each, bound)
-    noisy_total = m_total.release(exact.total)
-    if split:
-        m_count = mech(e_each, d_each, 1)
-        noisy_count = max(0, m_count.release(exact.count))
-    hidden = is_suppressed(noisy_count if noisy_basis else exact.count, policy.k)
-
+    scale = load_fields().value_fields[spec.value_field].scale
+    noisy_count, noisy_total = max(0, int(noisy[0])), int(noisy[1])
+    hidden = is_suppressed(noisy_count, policy.k)
     if spec.agg == "sum":
-        value = None if hidden else noisy_total / scale
-        return Released("sum", value, hidden, eps, delta, name, m_total.scale / scale, m_total.expected_abs_error / scale)
-
+        return Released("sum", None if hidden else noisy_total / scale, hidden, eps, delta, rho, name,
+                        plan.std(1) / scale, plan.expected_abs_error(1) / scale)
     hidden = hidden or noisy_count < 1                           # cannot divide by a non-positive noisy count
     if hidden:
-        return Released("avg", None, True, eps, delta, name, m_total.scale / scale, None)
-    avg = noisy_total / noisy_count / scale
-    lo_n, hi_n = lo / scale, hi / scale                          # post-processing: a mean must lie within the bounds
-    return Released("avg", min(max(avg, lo_n), hi_n), False, eps, delta, name, m_total.scale / scale, None)
+        return Released("avg", None, True, eps, delta, rho, name, plan.std(1) / scale, None)
+    lo, hi = value_bounds(spec.value_field, spec.condition)
+    avg = noisy_total / noisy_count / scale                     # post-processing: a mean must lie within the bounds
+    return Released("avg", min(max(avg, lo / scale), hi / scale), False, eps, delta, rho, name, plan.std(1) / scale, None)
+
+
+def _categories(spec: QuerySpec, exact: Exact) -> list[str]:
+    return list(exact.cells) if exact.cells is not None else []
+
+
+def release(spec: QuerySpec, exact: Exact, privacy: PrivacyParams, policy: ReleasePolicy = ReleasePolicy(),
+            randbelow=secrets.randbelow, contributors: int | None = None) -> Released:
+    """One full release of a KNOWN exact answer, in one process (attack demos, tests): every contributor's noise
+    share is drawn with the hospitals' own exact sampler and added, exactly as the MPC would."""
+    plan = plan_noise(spec, privacy, policy, contributors)
+    noisy = list(exact.as_cells())
+    for _ in range(plan.contributors):
+        noisy = [x + n for x, n in zip(noisy, plan.sample_share(randbelow), strict=True)]
+    return finalize(spec, noisy, plan, _categories(spec, exact), policy)
+
+
+def simulate_releases(spec: QuerySpec, exact: Exact, privacy: PrivacyParams, policy: ReleasePolicy, reps: int,
+                      rng: np.random.Generator, contributors: int | None = None) -> list[Released]:
+    """`reps` independent releases using the vectorised simulation of the total noise (evaluation only)."""
+    plan = plan_noise(spec, privacy, policy, contributors)
+    base = np.array(exact.as_cells(), dtype=np.int64)
+    noise = plan.simulate_total(reps, rng)
+    cats = _categories(spec, exact)
+    return [finalize(spec, list(base + row), plan, cats, policy) for row in noise]

@@ -9,6 +9,11 @@ import tempfile
 # import time, before any fixture or subprocess, so the generator, the services and spawned uvicorn processes
 # (which inherit os.environ) all agree on it.
 os.environ.setdefault("FEDHEALTH_SECRETS_DIR", tempfile.mkdtemp(prefix="fedhealth-test-secrets-"))
+# The test worlds have at most ~800 patients per hospital: pad PSI lists and the linked index to a public 1,024
+# instead of the deployment's 4,608 (the full-size tests raise it again).
+os.environ.setdefault("FEDHEALTH_LINK_PAD_TO", "1024")
+os.environ.setdefault("FEDHEALTH_DEADLINE_SCALE", "0")       # no response deadlines (tests/test_deadlines.py sets its own)
+TEST_PAD_TO = int(os.environ["FEDHEALTH_LINK_PAD_TO"])
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

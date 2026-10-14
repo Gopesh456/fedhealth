@@ -58,6 +58,7 @@ class Topology:
     coordinator_host: str
     coordinator_port: int
     coordinator_db: str
+    link_pad_to: int = 4608         # public size of every PSI list and of the linked index (configs/topology.yaml)
 
     def hospital_url(self, hospital_id: str) -> str:
         return self.hospitals[hospital_id].url(self.scheme)
@@ -87,6 +88,7 @@ def load_topology() -> Topology:
         coordinator_host=os.environ.get("FEDHEALTH_HOST_COORDINATOR", coord["host"]),
         coordinator_port=int(coord["port"]) + offset,
         coordinator_db=coord["db"],
+        link_pad_to=int(os.environ.get("FEDHEALTH_LINK_PAD_TO", (raw.get("linkage") or {}).get("pad_to", 4608))),
     )
 
 

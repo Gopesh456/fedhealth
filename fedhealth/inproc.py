@@ -5,7 +5,11 @@
 service boundary* (see leakscan.py).
 
 secure=True builds the STRICT deployment: service identities (signed tokens) on every hop, callers verified by
-the hospitals, and the coordinator's private API (JWT, RBAC, ledger, audit) mounted."""
+the hospitals, and the coordinator's private API (JWT, RBAC, ledger, audit) mounted.
+
+The hospitals' public response deadlines (hospital/deadlines.py) are OFF here unless `deadlines` is given: the three
+hospitals share one interpreter, so their timings mean nothing, and the attack/evaluation scripts run thousands of
+queries. The real deployments (scripts/run_local.py, Compose) read them from configs/policy.yaml."""
 from __future__ import annotations
 
 import json
@@ -19,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from fedhealth.coordinator.app import CoordinatorSecrets, create_coordinator_app
 from fedhealth.hospital.app import create_hospital_app
+from fedhealth.hospital.deadlines import ResponseDeadlines
 from fedhealth.privacy.encryption.service_auth import ServiceAuth, ServiceIdentity
 from fedhealth.privacy.encryption.tls import COORDINATOR, hospital_service_id
 
@@ -75,8 +80,9 @@ class RecordingClient:
 def build_system(data_dir: Path, psi_group: str = "modp2048", psi_groups: tuple[str, ...] | None = None,
                  allow_insecure: bool = True, *, secure: bool = False, tls_dir: Path | None = None,
                  secrets: CoordinatorSecrets | None = None, coordinator_db: Path | None = None,
-                 policy=None) -> SimpleNamespace:
+                 policy=None, deadlines: ResponseDeadlines | None = None) -> SimpleNamespace:
     kw = {"psi_groups": psi_groups} if psi_groups else {}
+    kw["deadlines"] = deadlines if deadlines is not None else ResponseDeadlines().scaled(0)
     if secure:
         kw["tls_dir"] = tls_dir
     apps = {h: create_hospital_app(h, db_path=Path(data_dir) / f"hospital_{h.lower()}.db",

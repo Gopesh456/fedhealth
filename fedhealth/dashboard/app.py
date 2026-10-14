@@ -127,7 +127,11 @@ def query_tab(me: dict) -> None:
                             agg=agg, value_field=value_field, group_by=group_by)
         with st.expander("Query as sent to the coordinator"):
             st.json({"query": query, "privacy": {"epsilon": epsilon, "mechanism": mechanism}})
-        if st.button("Run query", key="run", type="primary"):
+        involves_a_hospital = any(k in query for k in ("a", "b", "c", "value_field", "group_by"))
+        if not involves_a_hospital:
+            st.info("Choose at least one filter (treatment, follow-up outcome, age or sex) to run a count: each filter "
+                    "brings in the hospital that holds it.")
+        if st.button("Run query", key="run", type="primary", disabled=not involves_a_hospital):
             try:
                 st.session_state.last_result = {"query": query, "response": c.query(query, epsilon, mechanism), "error": None}
             except ApiError as exc:

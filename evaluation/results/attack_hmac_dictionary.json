@@ -1,14 +1,14 @@
 {
   "attack": "hmac dictionary",
-  "b_patients": 3150,
-  "b_only_patients": 500,
-  "shared_patients": 2400,
-  "dictionary_size": 204976,
-  "recovered_from_b": 3150,
-  "recovered_b_only": 500,
+  "b_patients": 2862,
+  "b_only_patients": 463,
+  "shared_patients": 2174,
+  "dictionary_size": 204974,
+  "recovered_from_b": 2862,
+  "recovered_b_only": 463,
   "false_positives": 0,
-  "hmac_per_second": 214193.45103616832,
-  "full_9digit_space_seconds": 4201.809138637145,
+  "hmac_per_second": 324047.43316247803,
+  "full_9digit_space_seconds": 2777.371174388344,
   "psi_non_shared_patients_recovered": 0,
-  "psi_candidates_tested": 103
+  "psi_candidates_tested": 125
 }

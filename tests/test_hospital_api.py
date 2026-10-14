@@ -12,7 +12,8 @@ PROTOCOL_PATHS = {                                   # protocol endpoints only: 
     "/health",
     "/psi/{lid}/init", "/psi/{lid}/step", "/psi/{lid}/inbox", "/psi/{lid}/publish", "/psi/{lid}/tags",
     "/psi/{lid}/finalize", "/psi/{lid}",
-    "/mpc/{sid}/prepare", "/mpc/{sid}/share", "/mpc/{sid}/inshare", "/mpc/{sid}/triples", "/mpc/{sid}/open",
+    "/mpc/{sid}/prepare", "/mpc/{sid}/share", "/mpc/{sid}/inshare", "/mpc/{sid}/deal", "/mpc/{sid}/intriples",
+    "/mpc/{sid}/open",
     "/mpc/{sid}/inopen", "/mpc/{sid}/finish", "/mpc/{sid}/output", "/mpc/{sid}",
     "/fl/{sid}/train", "/fl/{sid}/update", "/fl/{sid}/share", "/fl/{sid}/inshare", "/fl/{sid}/sumshare", "/fl/{sid}",
 }

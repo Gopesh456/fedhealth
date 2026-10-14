@@ -92,6 +92,8 @@ CONDITIONS: dict[str, Condition] = {c.code: c for c in (
             Drug("sitagliptin", "A10BH01", "DPP-4 inhibitor", 100, "QD", 0.15, -0.1),
             Drug("glipizide", "A10BB07", "sulfonylurea", 5, "BID", 0.12, -0.2),
             Drug("insulin glargine", "A10AE04", "insulin", 20, "QD", 0.08, 0.3),
+            Drug("insulin NPH/regular 70/30", "A10AD01", "insulin", 20, "BID", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
+            Drug("liraglutide", "A10BJ02", "GLP-1 agonist", 1.2, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
         ),
         None,
     ),
@@ -115,6 +117,7 @@ CONDITIONS: dict[str, Condition] = {c.code: c for c in (
             Drug("rosuvastatin", "C10AA07", "statin", 20, "QD", 0.32, 0.4),
             Drug("ezetimibe", "C10AX09", "cholesterol absorption inhibitor", 10, "QD", 0.14, -0.1),
             Drug("evolocumab", "C10AX13", "PCSK9 inhibitor", 140, "Q2W", 0.04, 0.8),
+            Drug("simvastatin", "C10AA01", "statin", 10, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
         ),
         None,
     ),
@@ -126,6 +129,10 @@ CONDITIONS: dict[str, Condition] = {c.code: c for c in (
             Drug("budesonide-formoterol", "R03AK07", "ICS/LABA", 0.2, "BID", 0.34, 0.5),
             Drug("montelukast", "R03DC03", "leukotriene antagonist", 10, "QD", 0.26, 0.0),
             Drug("tiotropium", "R03BB04", "LAMA", 0.0025, "QD", 0.04, 0.2),
+            Drug("fluticasone", "R03BA05", "ICS", 0.11, "BID", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
+            Drug("budesonide", "R03BA02", "ICS", 0.25, "BID", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
+            Drug("beclomethasone", "R03BA01", "ICS", 0.04, "BID", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
+            Drug("mometasone", "R03BA07", "ICS", 0.1, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
         ),
         ("Chest X-ray", ("no acute findings", "hyperinflation", "bronchial wall thickening")),
     ),
@@ -160,6 +167,8 @@ CONDITIONS: dict[str, Condition] = {c.code: c for c in (
             Drug("spironolactone", "C03DA01", "MRA", 25, "QD", 0.16, 0.2),
             Drug("sacubitril-valsartan", "C09DX04", "ARNI", 97, "BID", 0.11, 0.6),
             Drug("ivabradine", "C01EB17", "If inhibitor", 5, "BID", 0.03, 0.2),
+            Drug("lisinopril", "C09AA03", "ACE inhibitor", 20, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
+            Drug("losartan", "C09CA01", "ARB", 50, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
         ),
         ("Echocardiogram", ("EF preserved", "EF mildly reduced", "EF severely reduced", "LV hypertrophy")),
     ),
@@ -172,6 +181,7 @@ CONDITIONS: dict[str, Condition] = {c.code: c for c in (
             Drug("bupropion", "N06AX12", "NDRI", 150, "QD", 0.16, 0.1),
             Drug("mirtazapine", "N06AX11", "NaSSA", 30, "QD", 0.16, 0.0),
             Drug("vortioxetine", "N06AX26", "multimodal", 10, "QD", 0.04, 0.3),
+            Drug("fluoxetine", "N06AB03", "SSRI", 20, "QD", 0.0, 0.0),          # Synthea only (weight 0: never drawn by the synthetic generator)
         ),
         None,
     ),

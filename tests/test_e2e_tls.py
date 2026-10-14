@@ -87,7 +87,7 @@ def test_full_private_query_over_mutual_tls(strict_system):
         assert c.get("/health").json()["private_api"] is True
         tok = c.post("/auth/login", json={"username": "clinician1", "password": _password("clinician1")}).json()["access_token"]
         h = {"Authorization": f"Bearer {tok}"}
-        spec = headline_spec()
+        spec = headline_spec(a={}, b={})                                              # far above k: never suppressed
         r = c.post("/v1/query", headers=h, json={"query": spec.model_dump(mode="json", exclude_none=True), "privacy": {"epsilon": 2.0}})
         assert r.status_code == 200, r.text
         body = r.json()

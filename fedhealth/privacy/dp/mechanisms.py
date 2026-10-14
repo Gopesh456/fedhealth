@@ -15,15 +15,25 @@ WHY A *DISCRETE* LAPLACE
     everything reduces to Bernoulli(p) draws with RATIONAL p, and  Bernoulli(n/d) = [randbelow(d) < n].
 
 GAUSSIAN
-    (epsilon, delta)-DP with N(0, sigma^2), sigma calibrated by the ANALYTIC Gaussian mechanism (Balle & Wang,
-    2018), valid for every epsilon (the textbook sigma = Delta*sqrt(2 ln(1.25/delta))/epsilon only works for
-    epsilon < 1). The sample is a floating-point Gaussian rounded to an integer: rounding is post-processing, but
-    the floating-point caveat remains - documented in THREAT_MODEL.md.
+    The DISCRETE Gaussian N_Z(0, sigma^2), P(X = x) proportional to exp(-x^2 / (2 sigma^2)) over the integers, sampled
+    EXACTLY with the rejection sampler of CKS20 (Algorithm 3: a discrete-Laplace proposal accepted with a rational
+    Bernoulli(exp(-gamma))). It satisfies Delta^2 / (2 sigma^2)-zCDP (CKS20, Theorem 4), which is what the zCDP ledger
+    charges. `gaussian_sigma` / `gaussian_delta` (the analytic Gaussian of Balle & Wang, 2018) are kept only as a
+    reference point for the evaluation.
+
+DISTRIBUTED NOISE (used by the MPC, see privacy/dp/distributed.py)
+    Every hospital adds one noise SHARE inside the secure computation, so nobody - not even the coordinator - ever
+    sees an un-noised aggregate. The shares are built so that the noise contributed by any h honest hospitals is
+    already enough on its own:
+      * Laplace: a share is  Polya(1/h) - Polya(1/h). Polya (negative binomial with a real "number of successes")
+        is infinitely divisible: h shares sum to Geometric - Geometric, i.e. EXACTLY the discrete Laplace.
+        Sampled exactly by rejection from a geometric proposal (`sample_polya`).
+      * Gaussian: a share is N_Z(0, sigma^2 / h). Sums of discrete Gaussians are not exactly discrete Gaussian; the
+        privacy loss of the sum is bounded by Kairouz, Liu & Steinke (ICML 2021), see distributed.gaussian_rho.
 """
 from __future__ import annotations
 
 import math
-import random
 import secrets
 from fractions import Fraction
 from typing import Callable
@@ -65,6 +75,55 @@ def sample_discrete_laplace(s: int, t: int, randbelow: RandBelow = secrets.randb
         if negative and y == 0:                        # avoid double-counting zero
             continue
         return -y if negative else y
+
+
+def sample_geometric(s: int, t: int, randbelow: RandBelow = secrets.randbelow) -> int:
+    """Exact sample of P(Y = y) proportional to exp(-y * s / t), y = 0, 1, 2, ...  (the one-sided half of CKS20, Alg. 2)."""
+    if s <= 0 or t <= 0:
+        raise ValueError("s and t must be positive")
+    while True:
+        u = randbelow(t)
+        if not _bernoulli_exp_neg(Fraction(u, t), randbelow):
+            continue
+        v = 0
+        while _bernoulli_exp_neg(Fraction(1), randbelow):
+            v += 1
+        return (u + t * v) // s
+
+
+def sample_polya(r: Fraction, s: int, t: int, randbelow: RandBelow = secrets.randbelow) -> int:
+    """Exact sample of the Polya / negative-binomial law NB(r, a), a = exp(-s/t), 0 < r <= 1:
+        P(K = k) = C(k + r - 1, k) (1 - a)^r a^k.
+    Rejection from the geometric proposal (1 - a) a^k: the ratio target/proposal is proportional to
+        prod_{i=1..k} (i - 1 + r) / i   <= 1,
+    a product of RATIONAL Bernoulli probabilities, tested one factor at a time (early exit on the first failure).
+    Acceptance rate (1 - a)^(1 - r): r = 1 is the geometric itself."""
+    r = Fraction(r)
+    if not 0 < r <= 1:
+        raise ValueError("r must be in (0, 1]")
+    num, den = r.numerator, r.denominator
+    while True:
+        k = sample_geometric(s, t, randbelow)
+        if r == 1:
+            return k
+        i = 1                       # factor i is (i - 1 + r)/i = (den*(i-1) + num) / (den*i): integer-only Bernoulli
+        while i <= k and randbelow(den * i) < den * (i - 1) + num:
+            i += 1
+        if i > k:
+            return k
+
+
+def sample_discrete_gaussian(sigma2: Fraction, randbelow: RandBelow = secrets.randbelow) -> int:
+    """Exact sample of N_Z(0, sigma2) for a RATIONAL variance sigma2 > 0 (CKS20, Algorithm 3)."""
+    sigma2 = Fraction(sigma2)
+    if sigma2 <= 0:
+        raise ValueError("sigma2 must be positive")
+    t = math.isqrt(sigma2.numerator // sigma2.denominator) + 1          # floor(sigma) + 1
+    while True:
+        y = sample_discrete_laplace(1, t, randbelow)                     # proposal  P(y) ~ exp(-|y| / t)
+        gamma = (abs(y) - sigma2 / t) ** 2 / (2 * sigma2)
+        if _bernoulli_exp_neg(gamma, randbelow):
+            return y
 
 
 def _conservative_epsilon(epsilon: float, max_denominator: int = 10_000) -> Fraction:
@@ -132,53 +191,3 @@ def gaussian_sigma(epsilon: float, delta: float, sensitivity: float) -> float:
         else:
             hi = mid
     return hi
-
-
-class GaussianMechanism:
-    """(epsilon, delta)-DP via the analytic Gaussian mechanism; output rounded to an integer."""
-    name = "gaussian"
-
-    def __init__(self, epsilon: float, delta: float, sensitivity: int, rng: random.Random | None = None):
-        if epsilon <= 0 or not 0 < delta < 1 or sensitivity <= 0:
-            raise ValueError("need epsilon > 0, 0 < delta < 1, sensitivity > 0")
-        self.epsilon, self.delta, self.sensitivity = float(epsilon), float(delta), int(sensitivity)
-        self.sigma = gaussian_sigma(self.epsilon, self.delta, self.sensitivity)
-        self._rng = rng or random.SystemRandom()
-
-    def noise(self) -> int:
-        return int(round(self._rng.gauss(0.0, self.sigma)))
-
-    def release(self, value: int) -> int:
-        return int(value) + self.noise()
-
-    @property
-    def scale(self) -> float:
-        return self.sigma
-
-    @property
-    def expected_abs_error(self) -> float:
-        return self.sigma * math.sqrt(2 / math.pi)
-
-
-class NoNoise:
-    """The identity 'mechanism': NO privacy. Exists only so the attack demos can show what the k-threshold alone
-    (suppression without noise) fails to stop. It cannot be selected through the API (PrivacyParams does not
-    accept it); only an explicit ReleasePolicy(dp_enabled=False) in evaluation code turns it on."""
-    name = "none"
-    scale = 0.0
-    expected_abs_error = 0.0
-    delta = 0.0
-
-    def release(self, value: int) -> int:
-        return int(value)
-
-
-def make_mechanism(name: str, epsilon: float, sensitivity: int, delta: float = 0.0,
-                   randbelow: RandBelow = secrets.randbelow):
-    if name == "none":
-        return NoNoise()
-    if name == "laplace":
-        return LaplaceMechanism(epsilon, sensitivity, randbelow)
-    if name == "gaussian":
-        return GaussianMechanism(epsilon, delta, sensitivity)
-    raise ValueError(f"unknown mechanism {name!r}")

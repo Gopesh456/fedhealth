@@ -17,12 +17,14 @@ THE ATTACK
 WHAT WE MEASURE (accuracy of that guess over many targets x many repetitions; 50% = blind guessing)
     no protection         exact counts                       -> 100%
     k-threshold only      suppression, no noise              -> 100%   (the k-threshold does NOT stop differencing)
-    full DP, epsilon e    discrete Laplace noise on each query -> approaches 50% as e shrinks
+    full DP, epsilon e    distributed noise on each query      -> approaches 50% as e shrinks
     and the DIRECT attempt (age == t only) to show what the k-threshold DOES stop.
 
 THEORY (to check the measurement against)
-    Each answer carries independent discrete-Laplace noise; the difference N = X1 - X2 has
-    P(N = 0) = (1-a)(1+a^2)/(1+a)^3  with a = e^-epsilon, and the attacker's accuracy is exactly 0.5 + P(N=0)/2.
+    Each answer carries the sum of the three hospitals' noise shares: Polya(R) - Polya(R) with R = c/h total "successes"
+    (R = 1 is exactly the discrete Laplace; with tolerance 1, R = 3/2). The difference of two answers is
+    N = NB(2R, a) - NB(2R, a), a = e^-epsilon, so P(N = 0) = sum_k NB(2R, a)(k)^2 and the attacker's accuracy is
+    0.5 + P(N=0)/2 (when both answers are released). For R = 1 this is the closed form (1-a)(1+a^2)/(1+a)^3.
     Differential privacy additionally bounds ANY attacker: after two epsilon-DP answers, accuracy <= e^(2e)/(1+e^(2e)).
 """
 from __future__ import annotations
@@ -34,7 +36,7 @@ import numpy as np
 
 from common import (ExactOracle, common_args, oracle_from_args, save_json, seeded_randbelow, wilson)
 from fedhealth.common.schemas import QuerySpec
-from fedhealth.coordinator.release import PrivacyParams, ReleasePolicy, release
+from fedhealth.coordinator.release import PrivacyParams, ReleasePolicy, plan_noise, release
 
 EPSILONS = (0.1, 0.5, 1.0, 2.0, 5.0)
 
@@ -85,9 +87,18 @@ def find_targets(oracle: ExactOracle, n_targets: int, k: int = 10, seed: int = 0
     return yes[:half] + no[:half]
 
 
-def analytic_accuracy(eps: float) -> float:
+def analytic_accuracy(eps: float, r_total: float = 1.0) -> float:
+    """Exact accuracy of the threshold guess when each answer's noise is NB(R) - NB(R), R = r_total."""
     a = math.exp(-eps)
-    return 0.5 + (1 - a) * (1 + a * a) / (2 * (1 + a) ** 3)
+    r = 2 * r_total
+    p0, k = 0.0, 0
+    while True:
+        logp = math.lgamma(k + r) - math.lgamma(r) - math.lgamma(k + 1) + r * math.log1p(-a) + k * math.log(a)
+        p0 += math.exp(2 * logp)
+        if k > 10 and 2 * logp < -60:
+            break
+        k += 1
+    return 0.5 + p0 / 2
 
 
 def dp_bound(eps: float) -> float:
@@ -139,9 +150,15 @@ def run(oracle: ExactOracle, n_targets: int = 40, trials: int = 3000, seed: int 
     konly = attack(oracle, targets, ReleasePolicy(k=10, dp_enabled=False), None, trials, seed)
     rows.append({"mode": "k-threshold only (k=10, no noise)", "epsilon": None, **konly})
     for eps in EPSILONS:
-        r = attack(oracle, targets, ReleasePolicy(k=10), PrivacyParams(epsilon=eps), trials, seed + int(eps * 100))
+        privacy = PrivacyParams(epsilon=eps)
+        plan = plan_noise(count_spec(targets[0].condition, targets[0].drug, targets[0].age), privacy)
+        r = attack(oracle, targets, ReleasePolicy(k=10), privacy, trials, seed + int(eps * 100))
         rows.append({"mode": "k-threshold + differential privacy", "epsilon": eps, **r,
-                     "analytic_accuracy": analytic_accuracy(eps), "dp_bound": dp_bound(eps)})
+                     "noise_contributors": plan.contributors, "honest_shares": plan.honest,
+                     "analytic_accuracy": analytic_accuracy(eps, plan.contributors / plan.honest),
+                     # the coordinator colluding with one hospital subtracts that hospital's share: what is left is the
+                     # h honest shares, i.e. exactly one epsilon-DP discrete Laplace per answer
+                     "analytic_accuracy_coalition": analytic_accuracy(eps, 1.0), "dp_bound": dp_bound(eps)})
     out = {
         "attack": "differencing", "n_targets": len(targets), "trials_per_setting": trials,
         "responders": sum(t.improved for t in targets), "pipeline_queries_checked": oracle.pipeline_runs,

@@ -31,24 +31,46 @@ def fmt_s(x: float) -> str:
     return f"{x * 1000:.0f} ms" if x < 1 else f"{x:.2f} s" if x < 10 else f"{x:.1f} s"
 
 
+def section_data(d) -> str:
+    rows = [[code, c["name"], f"{c['episodes']:,}", f"{c['treated']:,}", f"{c['with_outcome']:,}",
+             pct(c["improved"] / c["with_outcome"], 0) if c["with_outcome"] else "-", ", ".join(c["top_drugs"]) or "-"]
+            for code, c in d["conditions"].items()]
+    sizes = ", ".join(f"{h}: {n:,}" for h, n in d["hospital_sizes"].items())
+    src = ("**Synthea** synthetic patients (Massachusetts; the shipped extract in `synthea/`, mapped by `fedhealth/synth/synthea.py`)"
+           if d["source"] == "synthea" else "the parametric synthetic generator (`fedhealth/synth/universe.py`)")
+    return (f"## 0. Data\n\nThe evaluation world is {d['people']:,} adults from {src}, as of {d['as_of']}, split into the three hospitals "
+            f"({sizes}); {d['membership_counts'].get('ABC', 0):,} are at all three.\n\n"
+            + table(["code", "condition", "episodes", "treated", "with an outcome", "improved", "most prescribed"], rows)
+            + "\n\n* Outcomes are derived from Synthea's own lab and vital-sign series (baseline before treatment vs follow-up after at "
+              "least 90 days; see the mapping notes in `fedhealth/synth/synthea.py`). Synthea records almost no follow-up PHQ-9 for depression "
+              "and only a spirometry proxy for asthma, so F32 and J45 have few or no outcomes; queries about them still run, they just count few patients.\n"
+              "* Adherence is a refill-coverage proxy (Synthea fills prescriptions on schedule), so it is high and narrow.\n")
+
+
 def section_differencing(d) -> str:
     rows = []
     for r in d["rows"]:
         eps = "-" if r["epsilon"] is None else f"{r['epsilon']:g}"
         rows.append([r["mode"], eps, f"{pct(r['accuracy'])} ({pct(r['ci95'][0], 0)}-{pct(r['ci95'][1], 0)})",
-                     pct(r["analytic_accuracy"]) if r.get("analytic_accuracy") else "-", pct(r["dp_bound"]) if r.get("dp_bound") else "-"])
+                     pct(r["analytic_accuracy"]) if r.get("analytic_accuracy") else "-",
+                     pct(r["analytic_accuracy_coalition"]) if r.get("analytic_accuracy_coalition") else "-",
+                     pct(r["dp_bound"]) if r.get("dp_bound") else "-"])
     dpr = {r["epsilon"]: r for r in d["rows"] if r["epsilon"]}
     direct = d["direct_attempt"]
     findings = [
         f"With exact answers - and with the k-threshold alone - the attacker identifies the target's outcome in **{pct(d['rows'][0]['accuracy'], 0)}** and **{pct(d['rows'][1]['accuracy'], 0)}** of trials: both queries cover cohorts far above k, so nothing is suppressed.",
         f"The k-threshold does stop the *direct* question: it suppressed {direct['k_only']['suppressed']} of {direct['k_only']['queries']} single-patient queries (without it, {direct['no_protection']['queries'] - direct['no_protection']['suppressed']} of {direct['no_protection']['queries']} would have leaked).",
         f"Differential privacy brings the attacker down to **{pct(dpr[0.1]['accuracy'])} at ε = 0.1**, {pct(dpr[1.0]['accuracy'])} at ε = 1 and {pct(dpr[5.0]['accuracy'])} at ε = 5 (blind guessing = 50%). The measured values track the exact formula for this attack and stay below the DP ceiling for any attacker.",
-        "ε = 5 per query offers almost no protection against this attack - the number to quote is the *per-patient* privacy loss, not 'DP is on'.",
+        "ε = 5 per query offers almost no protection against this attack - the number to quote is the *per-patient* privacy loss, not 'DP is on'. "
+        "(The hospitals refuse more than ε = 2 per query by default; ε = 5 is shown for the trend.)",
+        "The noise is now the sum of three hospitals' shares, any two of which already give ε-DP. The requester sees all three (slightly more noise than "
+        "ε needs); the coordinator colluding with one hospital can subtract that hospital's share and is left with exactly ε-DP noise - the "
+        "'coordinator + 1 hospital' column, still below the DP ceiling.",
     ]
     return (f"### Attack 1 - Differencing\n\n{d['n_targets']} targets ({d['responders']} responders, {d['n_targets'] - d['responders']} non-responders), "
             f"{d['trials_per_setting']:,} trials per setting. Exact counts were obtained through the real PSI + MPC pipeline "
             f"({d['pipeline_queries_checked']} distinct queries, each checked against ground truth); the noise is re-drawn through the real release stage.\n\n"
-            + table(["setting", "ε per query", "attacker accuracy (95% CI)", "exact theory", "DP ceiling"], rows)
+            + table(["setting", "ε per query", "requester's accuracy (95% CI)", "exact theory", "coordinator + 1 hospital (theory)", "DP ceiling"], rows)
             + "\n\n" + "\n".join(f"* {f}" for f in findings) + "\n\n![differencing](charts/attack_differencing.png)\n")
 
 
@@ -74,9 +96,11 @@ def section_budget(d) -> str:
             f"(one query's expected |error| = {d['single_query_expected_abs_error']:.2f}). {d['attackers_simulated']} independent attackers per point.\n\n"
             + table(["queries averaged", "ε burned", "mean abs error (no ledger)", "CLT approximation"], rows)
             + f"\n\n* Without a limit the error falls like 1/sqrt(N): after {rows[-1][0]} queries it is {rows[-1][2]} - privacy bought back by volume.\n"
-            f"* **With the ledger** (budget {l['budget']:g}), driven through the real pipeline: {l['answered']} of {l['attempted']} attempts were answered, the first refusal came at query "
+            f"* **With the ledger** (budget {l['budget']:g}), driven through the real pipeline: {l['answered']} of {l['attempted']} attempts were answered"
+            f"{' (' + str(l['suppressed']) + ' of them suppressed by the noisy k-threshold, still charged)' if l.get('suppressed') else ''}, the first refusal came at query "
             f"**{l['first_refusal_at_query']}**, ε spent {l['epsilon_spent']:g}. The attacker is stuck with the average of those {l['answered']} answers: in this run it is off by {l['final_abs_error']:.2f} "
             f"(a single run; the typical error after {l['answered']} answers is ≈{l['expected_abs_error_at_that_point']:.2f}) - and no further query is answered.\n"
+            "* Pure ε = 0.5 queries are cheapest under basic composition here (20 queries); zCDP would admit 12 - the ledger takes whichever admits more (section 2).\n"
             "* Not covered: an attacker with several accounts, or colluding requesters (each has an own budget).\n\n![budget](charts/attack_budget_exhaustion.png)\n")
 
 
@@ -90,14 +114,18 @@ def section_hmac(d) -> str:
 
 def section_accuracy(d) -> str:
     eps = sorted({r["epsilon"] for r in d["rows"]})
-    out = [f"## 2. Accuracy vs privacy\n\n{d['repetitions']:,} releases per cell through the real release stage (k = 10). "
-           "Exact aggregates come from the real private pipeline and were checked against ground truth.\n"]
+    out = [f"## 2. Accuracy vs privacy\n\n{d['repetitions']:,} releases per cell (k = {d['k']}). The noise is what the hospitals add inside the "
+           "secure computation: three shares (two computing hospitals + the triple dealer), sized so that any two of them give ε-DP "
+           "(collusion tolerance t = 1). Exact aggregates come from the real private pipeline and were checked against ground truth; "
+           "the noise is drawn with the vectorised simulation of the hospitals' exact samplers.\n"]
     counts = [r for r in d["rows"] if r["kind"] == "count"]
     for mech in ("laplace", "gaussian"):
         rows = []
         for cohort in ("small", "medium", "large"):
             sel = {r["epsilon"]: r for r in counts if r["mechanism"] == mech and r["cohort"] == cohort}
             rows.append([f"{cohort} (n={sel[eps[0]]['true_value']})"] + [f"{sel[e]['mae']:.2f} ({pct(sel[e]['relative_mae'], 1 if sel[e]['relative_mae'] >= 0.01 else 2)})" for e in eps])
+        th = {r["epsilon"]: r["theory_mae"] for r in counts if r["mechanism"] == mech and r["cohort"] == "small"}
+        rows.append(["theory: E\\|noise\\|"] + [f"{th[e]:.2f}" for e in eps])
         out.append(f"**{mech.capitalize()}** - mean absolute error in patients (relative error)\n\n" + table(["cohort"] + [f"ε = {e:g}" for e in eps], rows) + "\n")
     other = [r for r in d["rows"] if r["kind"] in ("avg", "histogram")]
     rows = []
@@ -105,14 +133,58 @@ def section_accuracy(d) -> str:
         sel = {r["epsilon"]: r for r in other if r["kind"] == kind}
         rows.append([f"{label}, {sel[eps[0]]['cohort']}"] + [f"{sel[e]['mae']:.2f}" for e in eps])
     out.append("**Other aggregates** (Laplace) - mean absolute error\n\n" + table(["query"] + [f"ε = {e:g}" for e in eps], rows) + "\n")
+    supp = []
+    for cohort in ("small", "medium"):
+        sel = {r["epsilon"]: r for r in counts if r["mechanism"] == "laplace" and r["cohort"] == cohort}
+        supp.append([f"{cohort} (n={sel[eps[0]]['true_value']})"] + [pct(sel[e]["suppressed_rate"]) for e in eps])
+    out.append(f"**The k-threshold now looks at the noisy count** - share of releases suppressed (Laplace)\n\n"
+               + table(["cohort"] + [f"ε = {e:g}" for e in eps], supp) + "\n")
     sm = {r["epsilon"]: r for r in counts if r["mechanism"] == "laplace" and r["cohort"] == "small"}
     lg = {r["epsilon"]: r for r in counts if r["mechanism"] == "laplace" and r["cohort"] == "large"}
     out.append(f"* The absolute error depends only on ε: ≈{sm[1.0]['mae']:.2f} patients at ε = 1 (theory {sm[1.0]['theory_mae']:.2f}), ≈{sm[0.1]['mae']:.1f} at ε = 0.1, for every cohort size.\n"
                f"* What it costs relatively differs hugely: at ε = 0.5 the small cohort (n={sm[0.5]['true_value']}) is off by {pct(sm[0.5]['relative_mae'], 0)}, the large one (n={lg[0.5]['true_value']}) by {pct(lg[0.5]['relative_mae'], 1)}.\n"
-               "* The Gaussian mechanism (δ = 10⁻⁶) is noisier than Laplace for a single count at these ε; its advantage appears with many composed queries.\n"
-               "* A histogram's bins all share one ε (parallel composition), so each bin is as accurate as a single count.\n\n"
+               "* The Gaussian mechanism (δ = 10⁻⁶) is noisier than Laplace for a single count at these ε; its advantage is in composition (below).\n"
+               "* A histogram's bins all share one ε (parallel composition), so each bin is as accurate as a single count.\n"
+               "* Suppression is no longer a hard cut at the exact count: a cohort near k is sometimes released and sometimes not. That fuzziness is what closes the old side channel (the decision is a function of the noisy count only, so it is covered by the DP guarantee).\n\n"
                "![accuracy](charts/accuracy_vs_epsilon.png)\n\n![relative error](charts/relative_error_vs_epsilon.png)\n")
+
+    tol = [r for r in d["rows"] if r["kind"] == "tolerance"]
+    rows = []
+    for mech in ("laplace", "gaussian"):
+        for t in sorted({r["tolerance"] for r in tol}):
+            sel = {r["epsilon"]: r for r in tol if r["mechanism"] == mech and r["tolerance"] == t}
+            rows.append([mech, t, f"{sel[eps[0]]['honest_shares']} of {sel[eps[0]]['noise_contributors']}"] + [f"{sel[e]['mae']:.2f}" for e in eps])
+    base = {r["epsilon"]: r["mae"] for r in tol if r["mechanism"] == "laplace" and r["tolerance"] == 0}
+    one = {r["epsilon"]: r["mae"] for r in tol if r["mechanism"] == "laplace" and r["tolerance"] == 1}
+    out.append("### The price of not trusting the coordinator\n\nThe same medium-cohort count with the noise sized for t = 0, 1, 2 hospitals "
+               "colluding with the coordinator. t = 0 is exactly the noise the old design added centrally, at the coordinator.\n\n"
+               + table(["mechanism", "t", "shares that must stay secret"] + [f"ε = {e:g}" for e in eps], rows)
+               + f"\n\n* The default (t = 1) costs ×{one[1.0] / base[1.0]:.2f} in mean absolute error at ε = 1 over a trusted coordinator "
+                 "(variance ×1.5); in exchange the coordinator never sees an exact count, and even the coordinator plus one hospital get ε-DP.\n\n"
+                 "![collusion tolerance](charts/collusion_tolerance_cost.png)\n")
+
+    a = d["accounting"]
+    pick = [r for r in a if r["epsilon"] in (0.02, 0.0502, 0.1262, 0.317, 0.7962, 2.0)] or a[::4]
+    rows = [[f"{r['epsilon']:g}", r["laplace_basic"], r["laplace_zcdp"], r["laplace_ledger"], r["gaussian_zcdp"]] for r in pick]
+    b = d["budget"]
+    cross = next((r["epsilon"] for r in a if r["laplace_basic"] >= r["laplace_zcdp"]), None)
+    out.append(f"### Budget accounting: zCDP next to basic composition\n\nHow many identical queries one researcher budget (ε = {b['epsilon']:g}, δ = {b['delta']:g}) admits.\n\n"
+               + table(["ε per query", "Laplace, basic Σε", "Laplace, zCDP", "Laplace, ledger", "Gaussian, zCDP"], rows)
+               + f"\n\n* Below ε ≈ {cross:g} per query zCDP admits more (ρ adds up, ε grows like √k); above it a few large pure-DP queries fit better under basic composition. "
+                 "The ledger keeps both accounts and admits a query if either still fits - Theorem 2 of SECURITY_THEOREMS.md shows the requester's guarantee is still (ε, δ) of the budget.\n"
+                 "* Gaussian queries are accounted in zCDP only (with the Kairouz-Liu-Steinke term for distributed discrete Gaussian noise), where they are far cheaper than any (ε, δ) sum.\n\n"
+                 "![accounting](charts/budget_accounting.png)\n")
     return "\n".join(out)
+
+
+def deadline_line(pd) -> str:
+    slow = max(pd["work_s"].items(), key=lambda kv: kv[1]["max"])
+    return (f"* **Public prepare deadline.** Every hospital answers `prepare` (its predicate and its noise draw) at a public deadline: "
+            f"{fmt_s(pd['deadline_s'])} for an exact count, plus an allowance per unit of noise scale for a noisy one. So the prepare time above is "
+            f"the deadline, not the work, and the cost is a latency floor. With the deadlines switched off, the slowest prepare over "
+            f"{len(pd['work_s'])} query shapes took {fmt_s(pd['max_work_s'])} ({slow[0]}; medians "
+            + ", ".join(f"{k} {fmt_s(v['median'])}" for k, v in pd["work_s"].items())
+            + f"). {pd['overruns']} of {pd['observed']} warm prepares overran the deadline.\n")
 
 
 def section_performance(d) -> str:
@@ -129,15 +201,21 @@ def section_performance(d) -> str:
            f"({d['reps']} warm repetitions, {d['cold_reps']} cold; FULL cold is a single first query after start-up). "
            f"Machine: {m['processor'] or m['platform']}, {m['cpu_count']} logical CPUs, Python {m['python']}, gmpy2 {'on' if m['gmpy2'] else 'off'}.\n\n"
            + table(["patients"] + [k for k, _ in keys], rows) + "\n",
-           "'FULL' = strict deployment: mutual TLS, service tokens, JWT login + RBAC, ε-ledger, k-threshold, DP noise and audit entry. "
+           "'FULL' = strict deployment: mutual TLS, service tokens, JWT login + RBAC, ε-ledger, hospital-generated noise shares inside the MPC, k-threshold and audit entry. "
            "'PSI' stages use the insecure per-index aggregation (isolating the linkage cost); 'SMPC' stages return the EXACT answer (isolating the secret-shared computation).\n",
-           f"Warm secret-shared query at {sizes[-1]:,} patients, breakdown: prepare {fmt_s(bd['prepare_s'])}, share {fmt_s(bd['share_s'])}, triples {fmt_s(bd['triples_s'])}, multiply {fmt_s(bd['multiply_s'])}.\n",
+           f"Warm secret-shared query at {sizes[-1]:,} patients, breakdown: prepare {fmt_s(bd['prepare_s'])}, share {fmt_s(bd['share_s'])}, triples from the dealer hospital {fmt_s(bd['triples_s'])}, multiply {fmt_s(bd['multiply_s'])}.\n",
            f"* **Linkage dominates.** A cold query at {sizes[-1]:,} patients takes {fmt_s(big['full_cold']['median'])}; once the linkage is cached the full pipeline answers in {fmt_s(big['full_warm']['median'])} - "
            f"{ratio:.0f}× the plain insecure join ({fmt_s(big['plain']['median'])}).\n"
-           f"* Cold linkage cost grows with the patient lists ({', '.join(f'{n:,}: {fmt_s(d['sizes'][str(n)]['psi_cold_linkage_s']['median'])}' for n in sizes)}).\n"
-           f"* Pure-Python modular exponentiation (no gmpy2) makes the cold linkage at {pp['n']:,} patients take {fmt_s(pp['linkage_s']['median'])}"
-           + (f" vs {fmt_s(pp['with_gmpy2_linkage_s']['median'])} with gmpy2 ({pp['linkage_s']['median'] / pp['with_gmpy2_linkage_s']['median']:.0f}× faster)." if pp.get('with_gmpy2_linkage_s') else ".") + "\n"
-           f"* Login (scrypt) costs {fmt_s(big['login_s'])} once per session.\n",
+           f"* Cold linkage at each size ({', '.join(f'{n:,}: {fmt_s(d['sizes'][str(n)]['psi_cold_linkage_s']['median'])}' for n in sizes)}): "
+           f"every PSI list is padded to the public bound M, so the cost is set by M, not by how many patients a hospital has.\n"
+           + (f"* Pure-Python modular exponentiation (no gmpy2) makes the cold linkage at {pp['n']:,} patients take {fmt_s(pp['linkage_s']['median'])}"
+              f" vs {fmt_s(pp['with_gmpy2_linkage_s']['median'])} with gmpy2 ({pp['linkage_s']['median'] / pp['with_gmpy2_linkage_s']['median']:.0f}× faster).\n"
+              if pp.get('with_gmpy2_linkage_s') and m["gmpy2"] else
+              "* gmpy2 was not installed on this machine, so every linkage time above uses pure-Python modular exponentiation "
+              "(`pip install -e \".[fast]\"` makes the cold linkage several times faster; the warm query does not use it).\n")
+           + f"* Login (scrypt) costs {fmt_s(big['login_s'])} once per session.\n"
+           + (f"* Drawing one hospital's noise share with the exact samplers: " + ", ".join(f"{k} {v * 1e3:.2f} ms" for k, v in d["noise_share_s"].items()) + ".\n" if d.get("noise_share_s") else "")
+           + (deadline_line(d["prepare_deadline"]) if d.get("prepare_deadline") else ""),
            "![stages](charts/performance_stages.png)\n\n![scaling](charts/performance_scaling.png)\n"]
     return "\n".join(out)
 
@@ -172,7 +250,10 @@ def section_federated(d) -> str:
 
 def main() -> None:
     parts = [f"# Evaluation results\n\n*Generated {dt.date.today().isoformat()} by `evaluation/make_report.py` from `evaluation/results/*.json` - every number below is a measurement from `python evaluation/run_all.py`, none is hand-typed. "
-             "Synthetic data only; see THREAT_MODEL.md for what these results do and do not show.*\n"]
+             "Synthetic patients only (Synthea); see THREAT_MODEL.md and SECURITY_THEOREMS.md for what these results do and do not show.*\n"]
+    data = load("data")
+    if data:
+        parts.append(section_data(data))
     d1, d2, d3, d4 = (load(n) for n in ("attack_differencing", "attack_reidentification", "attack_budget_exhaustion", "attack_hmac_dictionary"))
     parts.append("## 1. Attack demonstrations - why each defence matters\n")
     for d, fn in ((d1, section_differencing), (d2, section_reid), (d3, section_budget), (d4, section_hmac)):

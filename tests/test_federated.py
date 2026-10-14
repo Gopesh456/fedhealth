@@ -208,6 +208,26 @@ def test_in_plain_mode_the_coordinator_sees_each_update_but_nothing_else(world, 
     assert not [e for e in system.rec.events if e.path.endswith("/inshare")]
 
 
+def test_the_coordinator_cannot_regenerate_the_dp_noise_or_take_both_releases(world, system):
+    """The coordinator chooses the training seed; if the noise came from it, it could regenerate and subtract it.
+    Two hospitals trained with the same seed and round therefore hold DIFFERENT noisy updates each time; and a round
+    released as shares cannot also be fetched in the clear."""
+    a = system.raw["A"]
+    body = {"weights": [0.0] * DIM, "parties": ["A", "B", "C"], "round_no": 1, "epochs": 1, "lr": 0.1, "batch": 32,
+            "l2": 0.0, "clip": 1.0, "noise_multiplier": 1.0, "seed": 7}
+    ups = []
+    for sid in ("a1" * 8, "a2" * 8):
+        assert a.post(f"/fl/{sid}/train", json=body).status_code == 200
+        ups.append(np.array(a.post(f"/fl/{sid}/update").json()["update"]))
+        a.delete(f"/fl/{sid}")
+    assert not np.allclose(ups[0], ups[1])                                        # same seed, fresh noise
+    sid = "a3" * 8
+    assert a.post(f"/fl/{sid}/train", json=body).status_code == 200
+    assert a.post(f"/fl/{sid}/update").status_code == 200
+    assert a.post(f"/fl/{sid}/share").status_code == 409                          # already released in the clear
+    a.delete(f"/fl/{sid}")
+
+
 def test_a_hospital_failing_mid_round_aborts_training_and_leaves_no_state_behind(world, system, monkeypatch):
     real_post = system.orchestrator.clients["B"].post
 
@@ -237,5 +257,10 @@ def test_fl_endpoints_obey_the_service_identity_rules(world, pki):
     assert a.post(f"/fl/{sid}/train", json={**body, "weights": [0.0]}, auth=as_coord).status_code == 400   # wrong dimension
     assert a.post(f"/fl/{sid}/train", json={**body, "noise_multiplier": 1.0}, auth=as_coord).status_code == 400  # noise without clip
     assert a.post(f"/fl/{sid}/train", json={**body, "lr": 50}, auth=as_coord).status_code == 422             # validated hyper-parameters
+    for few in (["A"], ["A", "B"], ["B", "A", "C"]):                                            # a round of one would
+        assert a.post(f"/fl/{sid}/train", json={**body, "parties": few}, auth=as_coord).status_code == 400  # "aggregate" A alone
+    assert a.post(f"/fl/{sid}/train", json=body, auth=as_coord).status_code == 200
+    assert a.post(f"/fl/{sid}/update", auth=as_coord).status_code == 403                         # no plain updates in strict mode
+    a.delete(f"/fl/{sid}", auth=as_coord)
     out = sec.orchestrator.federated_train(FedAvgConfig(rounds=2, local_epochs=1, lr=0.2, secure_agg=True))
     assert out.weights.shape == (DIM,)

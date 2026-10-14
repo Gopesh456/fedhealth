@@ -1,0 +1,115 @@
+{
+  "source": "synthea",
+  "people": 5000,
+  "hospital_sizes": {
+    "A": 3814,
+    "B": 2862,
+    "C": 3255
+  },
+  "membership_counts": {
+    "ABC": 1756,
+    "A": 864,
+    "AB": 418,
+    "AC": 776,
+    "B": 463,
+    "C": 498,
+    "BC": 225
+  },
+  "as_of": "2025-12-31",
+  "sex": {
+    "F": 2475,
+    "M": 2525
+  },
+  "median_birth_year": 1966,
+  "conditions": {
+    "E11": {
+      "name": "Type 2 diabetes mellitus",
+      "episodes": 1946,
+      "treated": 721,
+      "with_outcome": 694,
+      "improved": 317,
+      "top_drugs": [
+        "metformin",
+        "insulin NPH/regular 70/30",
+        "liraglutide"
+      ]
+    },
+    "I10": {
+      "name": "Essential hypertension",
+      "episodes": 3210,
+      "treated": 3210,
+      "with_outcome": 3177,
+      "improved": 1415,
+      "top_drugs": [
+        "lisinopril",
+        "hydrochlorothiazide",
+        "amlodipine"
+      ]
+    },
+    "E78": {
+      "name": "Hyperlipidaemia",
+      "episodes": 1480,
+      "treated": 1475,
+      "with_outcome": 1412,
+      "improved": 525,
+      "top_drugs": [
+        "simvastatin"
+      ]
+    },
+    "J45": {
+      "name": "Asthma",
+      "episodes": 599,
+      "treated": 599,
+      "with_outcome": 12,
+      "improved": 4,
+      "top_drugs": [
+        "salbutamol",
+        "budesonide",
+        "fluticasone"
+      ]
+    },
+    "J44": {
+      "name": "Chronic obstructive pulmonary disease",
+      "episodes": 277,
+      "treated": 271,
+      "with_outcome": 256,
+      "improved": 61,
+      "top_drugs": [
+        "fluticasone-salmeterol",
+        "salbutamol"
+      ]
+    },
+    "N18": {
+      "name": "Chronic kidney disease",
+      "episodes": 1125,
+      "treated": 243,
+      "with_outcome": 236,
+      "improved": 135,
+      "top_drugs": [
+        "epoetin alfa"
+      ]
+    },
+    "I50": {
+      "name": "Heart failure",
+      "episodes": 49,
+      "treated": 48,
+      "with_outcome": 19,
+      "improved": 11,
+      "top_drugs": [
+        "furosemide",
+        "carvedilol",
+        "losartan"
+      ]
+    },
+    "F32": {
+      "name": "Major depressive disorder",
+      "episodes": 75,
+      "treated": 55,
+      "with_outcome": 0,
+      "improved": 0,
+      "top_drugs": [
+        "fluoxetine"
+      ]
+    }
+  }
+}
